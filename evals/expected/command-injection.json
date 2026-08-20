@@ -1,0 +1,3 @@
+[
+  {"category":"security","severity":"high","file":"src/runner.ts","lineStart":1,"lineEnd":1,"title":"Command execution with untrusted input"}
+]

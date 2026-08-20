@@ -1,0 +1,6 @@
+{"id":"command-injection","title":"Command execution with request input","fixture":"fixtures/command-injection.diff","expected":"expected/command-injection.json"}
+{"id":"sql-injection","title":"Dynamic SQL built from request input","fixture":"fixtures/sql-injection.diff","expected":"expected/sql-injection.json"}
+{"id":"path-traversal","title":"User-controlled file path","fixture":"fixtures/path-traversal.diff","expected":"expected/path-traversal.json"}
+{"id":"swallowed-error","title":"Empty exception handler","fixture":"fixtures/swallowed-error.diff","expected":"expected/swallowed-error.json"}
+{"id":"todo-quality","title":"Unresolved TODO in changed code","fixture":"fixtures/todo-quality.diff","expected":"expected/todo-quality.json"}
+{"id":"clean-change","title":"Safe documentation change","fixture":"fixtures/clean-change.diff","expected":"expected/clean-change.json"}

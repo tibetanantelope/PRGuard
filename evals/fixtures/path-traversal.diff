@@ -1,0 +1,5 @@
+diff --git a/src/files.ts b/src/files.ts
+--- a/src/files.ts
++++ b/src/files.ts
+@@ -1,1 +1,2 @@
++const target = path.join(baseDir, userInput);

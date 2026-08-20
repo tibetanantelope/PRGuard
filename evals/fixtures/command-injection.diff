@@ -1,0 +1,5 @@
+diff --git a/src/runner.ts b/src/runner.ts
+--- a/src/runner.ts
++++ b/src/runner.ts
+@@ -1,1 +1,2 @@
++export function run(input: string) { return exec(input); }

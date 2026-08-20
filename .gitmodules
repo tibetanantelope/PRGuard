@@ -1,0 +1,13 @@
+[submodule "external/MiniCode-rs"]
+	path = external/MiniCode-rs
+	url = https://github.com/harkerhand/MiniCode-rs.git
+[submodule "external/MiniCode-Python"]
+	path = external/MiniCode-Python
+	url = https://github.com/QUSETIONS/MiniCode-Python.git
+[submodule "external/MiniCode4j"]
+	path = external/MiniCode4j
+	url = https://github.com/hobbescalvin414-tech/minicode4j.git
+	branch = feat/default-ts-ui
+[submodule "external/MiniCode-go"]
+	path = external/MiniCode-go
+	url = https://github.com/ssbsunshengbo/MiniCode.git

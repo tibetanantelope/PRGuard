@@ -1,0 +1,3 @@
+[
+  {"category":"code_quality","severity":"low","file":"src/parser.ts","lineStart":1,"lineEnd":1,"title":"Changed code contains an unresolved marker"}
+]

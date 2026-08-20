@@ -1,0 +1,13 @@
+node_modules/
+tmp/
+dist/
+~/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+
+# MiniCode local artifacts
+.mini-code/settings.local.json
+.mini-code/sessions/

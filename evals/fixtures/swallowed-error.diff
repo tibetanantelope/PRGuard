@@ -1,0 +1,6 @@
+diff --git a/src/worker.ts b/src/worker.ts
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -1,1 +1,3 @@
++try { await work(); }
++catch (error) {}
