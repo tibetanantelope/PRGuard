@@ -82,7 +82,7 @@ function detectStatus(lines: string[], oldPath: string, filePath: string): DiffS
 }
 
 export function parseUnifiedDiff(diffText: string): ChangedFile[] {
-  const lines = diffText.split(/\r?\n/)
+  const lines = diffText.replace(/^\uFEFF/, '').split(/\r?\n/)
   const files: ChangedFile[] = []
   let current: {
     oldPath: string

@@ -212,4 +212,6 @@ npm run check
 npm test
 ```
 
+ ## PRGuard local review demo
+
 MiniCode is intentionally small and pragmatic. The goal is to keep the architecture understandable, hackable, and easy to extend.

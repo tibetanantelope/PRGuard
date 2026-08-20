@@ -41,6 +41,13 @@ describe('PRGuard repository input', () => {
     })
   })
 
+  it('parses a PowerShell UTF-8 diff with a leading BOM', () => {
+    const files = parseUnifiedDiff('\uFEFFdiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,2 @@\n+new documentation\n')
+    assert.equal(files.length, 1)
+    assert.equal(files[0]?.path, 'README.md')
+    assert.equal(files[0]?.additions, 1)
+  })
+
   it('loads a diff file and discovers repository context', async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'minicode-prguard-'))
     const localPath = path.join(process.cwd(), '.tmp-prguard-change.diff')
