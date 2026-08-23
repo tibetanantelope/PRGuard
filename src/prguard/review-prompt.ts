@@ -26,6 +26,7 @@ export function buildPrReviewSystemPrompt(options: {
     'Do not report formatting-only changes or speculative risks as high severity.',
     'Every finding must point to a changed file and positive line range.',
     'Every finding must contain at least one evidence item with file, line range, content, and explanation.',
+    'Use evidence source "diff" only for content that appears in the supplied unified diff. Use "repository" or "code" for context read from existing repository files.',
     'Return only one JSON object. Do not wrap it in Markdown or add commentary.',
     'The JSON object must have this shape: {"findings": [...]}.',
     'Each finding must contain: id, category, severity, confidence, file, lineStart, lineEnd, title, evidence, reason, suggestedFix.',

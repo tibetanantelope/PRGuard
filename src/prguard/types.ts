@@ -12,6 +12,7 @@ export const severities = ['low', 'medium', 'high', 'critical'] as const
 
 export const evidenceSources = [
   'diff',
+  'repository',
   'code',
   'dependency',
   'configuration',

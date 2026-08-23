@@ -214,7 +214,7 @@ function splitCommand(commandLine: string): [string, string[]] {
   return [command, args]
 }
 
-async function runVerificationCommand(
+export async function runVerificationCommand(
   cwd: string,
   commandLine: string,
 ): Promise<{ passed: boolean; output: string }> {
@@ -236,7 +236,12 @@ async function runVerificationCommand(
     throw new Error(`Verification command is not allowed: ${command}`)
   }
   try {
-    const result = await execFileAsync(command, args, {
+    const isWindowsScript = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command)
+    const executable = isWindowsScript ? (process.env.ComSpec ?? 'cmd.exe') : command
+    const executableArgs = isWindowsScript
+      ? ['/d', '/s', '/c', [command, ...args].join(' ')]
+      : args
+    const result = await execFileAsync(executable, executableArgs, {
       cwd,
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,

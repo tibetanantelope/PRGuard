@@ -4,6 +4,7 @@ import {
   buildPrReviewSystemPrompt,
   buildPrReviewUserPrompt,
   parseModelReviewOutput,
+  detectDeterministicFindings,
 } from '../src/prguard/index.js'
 import type { PrDiffSnapshot } from '../src/prguard/types.js'
 
@@ -66,6 +67,7 @@ describe('PRGuard review output', () => {
     assert.equal(result.findings[0]?.verification.status, 'pending')
     assert.equal(result.findings[0]?.status, 'open')
     assert.equal(result.findings[0]?.file, 'src/auth.ts')
+    assert.equal(result.findings[0]?.evidence[0]?.source, 'diff')
   })
 
   it('rejects model output without evidence-backed findings', () => {
@@ -101,5 +103,45 @@ describe('PRGuard review output', () => {
 
     assert.equal(result.findings.length, 1)
     assert.equal(result.findings[0]?.evidence.length, 1)
+    assert.equal(result.findings[0]?.evidence[0]?.source, 'repository')
+  })
+
+  it('downgrades a diff evidence label when content is not in the diff', () => {
+    const result = parseModelReviewOutput(JSON.stringify({
+      findings: [{
+        id: 'finding-context',
+        category: 'security',
+        severity: 'high',
+        confidence: 0.8,
+        file: 'src/auth.ts',
+        lineStart: 2,
+        lineEnd: 2,
+        title: 'Context issue',
+        evidence: [{
+          source: 'diff',
+          file: 'src/auth.ts',
+          lineStart: 2,
+          lineEnd: 2,
+          content: 'const existing = true',
+          explanation: 'This came from repository context.',
+        }],
+        reason: 'Repository context supports the concern.',
+        suggestedFix: 'Review the existing implementation.',
+      }],
+    }), snapshot)
+    assert.equal(result.findings[0]?.evidence[0]?.source, 'repository')
+  })
+
+  it('detects shell execution and eval in added lines without a model', () => {
+    const findings = detectDeterministicFindings(`diff --git a/src/runner.js b/src/runner.js
+--- a/src/runner.js
++++ b/src/runner.js
+@@ -1,0 +1,2 @@
++exec(input)
++eval(input)
+`)
+    assert.equal(findings.length, 2)
+    assert.equal(findings[0]?.category, 'security')
+    assert.equal(findings[0]?.confidence, 1)
   })
 })

@@ -159,6 +159,7 @@ export async function runMultiAgentPrReview(
   }
   const aggregated = aggregateAgentReviews(snapshot, reviews, reports)
   await options.trace?.record('review_completed', {
+    result: aggregated,
     mode: 'multi_agent',
     agentCount: reports.length,
     findingCount: aggregated.findings.length,
@@ -166,4 +167,3 @@ export async function runMultiAgentPrReview(
   })
   return aggregated
 }
-

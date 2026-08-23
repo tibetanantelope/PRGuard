@@ -30,6 +30,7 @@ import {
   loadPrGuardTrace,
   replayPrGuardTrace,
 } from './prguard/index.js'
+import { reviewResultSchema } from './prguard/index.js'
 import {
   evaluateDataset,
   formatEvalReport,
@@ -53,7 +54,7 @@ minicode skills remove <name> [--project]
 
 minicode pr review --base <git-ref> [--head <git-ref>] [--test-command <cmd>] [--multi-agent] [--json] [--preview]
 minicode pr review --diff <path> [--github <owner/repo#number>] [--test-command <cmd>] [--multi-agent] [--json] [--preview]
-minicode pr repair --base <git-ref> --finding <id> --test-command <cmd> [--head <git-ref>] [--json]
+minicode pr repair --base <git-ref> --finding <id> --test-command <cmd> [--head <git-ref>] [--review-run <run-id>] [--json]
 minicode pr trace list
 minicode pr trace show <run-id>
 minicode pr trace replay <run-id>
@@ -371,6 +372,7 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     const diffPath = takeOption(repairArgs, '--diff')
     const findingId = takeOption(repairArgs, '--finding')
     const testCommand = takeOption(repairArgs, '--test-command')
+    const reviewRunId = takeOption(repairArgs, '--review-run')
     const asJson = repairArgs.includes('--json')
     if (asJson) repairArgs.splice(repairArgs.indexOf('--json'), 1)
     if (repairArgs.length > 0) {
@@ -391,7 +393,20 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     await trace.record('checkpoint', { phase: 'review_started' })
     let patch
     try {
-      const review = await runPrReview(snapshot, runtime, { trace })
+      let review
+      if (reviewRunId) {
+        const events = await loadPrGuardTrace(reviewRunId)
+        const completed = [...events].reverse().find(event =>
+          event.type === 'review_completed' && event.payload.result,
+        )
+        if (!completed) {
+          throw new Error(`Review run does not contain a reusable review result: ${reviewRunId}`)
+        }
+        review = reviewResultSchema.parse(completed.payload.result)
+        await trace.record('checkpoint', { phase: 'review_reused', sourceRunId: reviewRunId })
+      } else {
+        review = await runPrReview(snapshot, runtime, { trace })
+      }
       await trace.record('checkpoint', { phase: 'review_ready' })
       patch = await generatePatch(snapshot, review, [findingId], runtime, { trace })
     } catch (error) {

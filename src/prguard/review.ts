@@ -8,9 +8,10 @@ import { createDefaultToolRegistry } from '../tools/index.js'
 import { withTraceModel, type PrGuardTrace } from './trace.js'
 import { findingSchema, reviewResultSchema, type Finding, type PrDiffSnapshot, type ReviewResult } from './types.js'
 import { buildPrReviewSystemPrompt, buildPrReviewUserPrompt } from './review-prompt.js'
+import { applyDeterministicRules } from './rules.js'
 
 const modelEvidenceSchema = z.object({
-  source: z.enum(['diff', 'code', 'dependency', 'configuration', 'test']),
+  source: z.enum(['diff', 'repository', 'code', 'dependency', 'configuration', 'test']),
   file: z.string().min(1),
   lineStart: z.number().int().positive(),
   lineEnd: z.number().int().positive(),
@@ -38,6 +39,7 @@ const modelReviewSchema = z.object({
 
 const evidenceSourceNames = new Set([
   'diff',
+  'repository',
   'code',
   'dependency',
   'configuration',
@@ -103,7 +105,7 @@ function normalizeModelReviewOutput(value: unknown): unknown {
                 source: typeof evidenceRecord.source === 'string'
                   && evidenceSourceNames.has(evidenceRecord.source)
                   ? evidenceRecord.source
-                  : 'diff',
+                  : 'repository',
               }
             })
           : normalizedEvidence,
@@ -116,9 +118,34 @@ export function parseModelReviewOutput(
   content: string,
   snapshot: PrDiffSnapshot,
 ): ReviewResult {
-  const parsed = modelReviewSchema.safeParse(
-    normalizeModelReviewOutput(extractJsonObject(content)),
-  )
+  const normalized = normalizeModelReviewOutput(extractJsonObject(content))
+  if (typeof normalized === 'object' && normalized !== null && !Array.isArray(normalized)) {
+    const record = normalized as Record<string, unknown>
+    if (Array.isArray(record.findings)) {
+      const changedPaths = new Set(snapshot.changedFiles.map(file => file.path))
+      record.findings = record.findings.map(finding => {
+        if (typeof finding !== 'object' || finding === null || Array.isArray(finding)) return finding
+        const findingRecord = finding as Record<string, unknown>
+        if (!Array.isArray(findingRecord.evidence)) return finding
+        return {
+          ...findingRecord,
+          evidence: findingRecord.evidence.map(evidence => {
+            if (typeof evidence !== 'object' || evidence === null || Array.isArray(evidence)) return evidence
+            const evidenceRecord = evidence as Record<string, unknown>
+            const isDiffEvidence = evidenceRecord.source === 'diff'
+              && typeof evidenceRecord.file === 'string'
+              && typeof evidenceRecord.content === 'string'
+              && changedPaths.has(evidenceRecord.file)
+              && snapshot.diffText.includes(evidenceRecord.content)
+            return isDiffEvidence || evidenceRecord.source !== 'diff'
+              ? evidenceRecord
+              : { ...evidenceRecord, source: 'repository' }
+          }),
+        }
+      })
+    }
+  }
+  const parsed = modelReviewSchema.safeParse(normalized)
   if (!parsed.success) {
     throw new Error(`Invalid PRGuard review output: ${parsed.error.message}`)
   }
@@ -274,7 +301,9 @@ export async function runPrReview(
     }
     result = parseModelReviewOutput(retryFinalMessage.content, snapshot)
   }
+  result = applyDeterministicRules(result, snapshot)
   await options.trace?.record('review_completed', {
+    result,
     findingCount: result.findings.length,
     findingIds: result.findings.map(finding => finding.id),
     bySeverity: result.summary.bySeverity,
