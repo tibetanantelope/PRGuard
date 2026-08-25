@@ -29,6 +29,15 @@ export type RuntimeConfig = {
   maxOutputTokens?: number
   mcpServers: Record<string, McpServerConfig>
   sourceSummary: string
+  prGuardMySqlUrl?: string
+  prGuardRedisUrl?: string
+  prGuardMaxAttempts?: number
+  prGuardReviewTimeoutMs?: number
+  prGuardGithubToken?: string
+  prGuardGithubWebhookSecret?: string
+  prGuardGithubWorkspace?: string
+  prGuardApiKey?: string
+  prGuardRateLimitPerMinute?: number
 }
 
 export type McpConfigScope = 'user' | 'project'
@@ -71,6 +80,11 @@ function parseDotEnv(content: string): Record<string, string> {
   }
 
   return values
+}
+
+function parsePositiveInteger(value: string | number | undefined, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 async function readDotEnvFile(filePath = PROJECT_ENV_PATH): Promise<Record<string, string>> {
@@ -256,6 +270,15 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     String(env.ANTHROPIC_BASE_URL ?? '').trim() || 'https://api.anthropic.com'
   const authToken = String(env.ANTHROPIC_AUTH_TOKEN ?? '').trim() || undefined
   const apiKey = String(env.ANTHROPIC_API_KEY ?? '').trim() || undefined
+  const prGuardMySqlUrl = String(env.PR_GUARD_MYSQL_URL ?? '').trim() || undefined
+  const prGuardRedisUrl = String(env.PR_GUARD_REDIS_URL ?? '').trim() || undefined
+  const prGuardMaxAttempts = parsePositiveInteger(env.PR_GUARD_MAX_ATTEMPTS, 3)
+  const prGuardReviewTimeoutMs = parsePositiveInteger(env.PR_GUARD_REVIEW_TIMEOUT_MS, 120_000)
+  const prGuardGithubToken = String(env.GITHUB_TOKEN ?? env.GH_TOKEN ?? '').trim() || undefined
+  const prGuardGithubWebhookSecret = String(env.PR_GUARD_GITHUB_WEBHOOK_SECRET ?? '').trim() || undefined
+  const prGuardGithubWorkspace = String(env.PR_GUARD_GITHUB_WORKSPACE ?? '').trim() || undefined
+  const prGuardApiKey = String(env.PR_GUARD_API_KEY ?? '').trim() || undefined
+  const prGuardRateLimitPerMinute = parsePositiveInteger(env.PR_GUARD_RATE_LIMIT_PER_MINUTE, 120)
   const rawMaxOutputTokens =
     process.env.MINI_CODE_MAX_OUTPUT_TOKENS ??
     effectiveSettings.maxOutputTokens ??
@@ -287,5 +310,14 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     maxOutputTokens,
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${PROJECT_ENV_PATH} > ${MINI_CODE_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env`,
+    prGuardMySqlUrl,
+    prGuardRedisUrl,
+    prGuardMaxAttempts,
+    prGuardReviewTimeoutMs,
+    prGuardGithubToken,
+    prGuardGithubWebhookSecret,
+    prGuardGithubWorkspace,
+    prGuardApiKey,
+    prGuardRateLimitPerMinute,
   }
 }

@@ -1,9 +1,16 @@
 import { loadPrDiffSnapshot, loadRepositoryContext, parseUnifiedDiff } from './repository.js'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { PrDiffSnapshot, ReviewInput } from './types.js'
 
 const MAX_GITHUB_DIFF_BYTES = 8 * 1024 * 1024
 
 export type GithubPrRef = { owner: string; repo: string; number: number }
+
+export type GithubWebhookEvent = {
+  action?: string
+  pull_request?: { number?: number; base?: { ref?: string }; head?: { ref?: string } }
+  repository?: { name?: string; owner?: { login?: string } }
+}
 
 function validatePart(value: string, label: string): string {
   if (!/^[A-Za-z0-9_.-]+$/.test(value) || value === '.' || value === '..') {
@@ -23,6 +30,24 @@ export function parseGithubPrRef(value: string): GithubPrRef {
   const number = Number(match[3])
   if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`Invalid GitHub PR number: ${match[3]}`)
   return { owner: validatePart(match[1]!, 'owner'), repo: validatePart(match[2]!, 'repository'), number }
+}
+
+export function verifyGithubWebhookSignature(body: string | Buffer, signature: string | undefined, secret: string): boolean {
+  if (!signature?.startsWith('sha256=') || !secret) return false
+  const expected = createHmac('sha256', secret).update(body).digest('hex')
+  const received = signature.slice('sha256='.length)
+  if (!/^[a-f0-9]{64}$/i.test(received)) return false
+  return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(received, 'hex'))
+}
+
+export function parseGithubWebhookEvent(value: unknown): GithubPrRef | null {
+  if (!value || typeof value !== 'object') return null
+  const event = value as GithubWebhookEvent
+  const owner = event.repository?.owner?.login
+  const repo = event.repository?.name
+  const pullNumber = event.pull_request?.number
+  if (!owner || !repo || pullNumber === undefined || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) return null
+  return parseGithubPrRef(`${owner}/${repo}#${pullNumber}`)
 }
 
 export async function fetchGithubPrDiff(

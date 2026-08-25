@@ -35,6 +35,10 @@ npm.cmd run dev -- pr eval --baseline --json
 ```powershell
 npm.cmd run dev -- pr eval --predictions model-predictions.jsonl
 npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --json
+
+# 将模型预测与规则基线进行对比
+npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --compare-baseline
+npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --compare-baseline --json
 ```
 
 ## 指标定义
@@ -45,6 +49,10 @@ npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --json
 - Patch Test Pass Rate：预测文件中提供 `patchTestPassed` 时计算，否则显示 `n/a`。
 - Average Tool Calls / Tokens / Duration：预测文件提供对应字段时统计。
 - Task Failure Rate：预测文件中 `failed: true` 的任务比例。
+- False Positives / False Negatives：分别表示多报和漏报的 Finding 数量。
+
+## 基线回归
+
+`--compare-baseline` 会在同一数据集上运行规则基线，并输出候选模型相对于基线的指标差值。当前将 Finding F1、高风险召回率下降和任务失败率上升标记为回归，适合在模型升级或 Prompt 修改后作为发布前检查。
 
 评测器只负责比较结果，不会自动修改仓库，也不会执行预测文件里的命令。补丁是否安全，应由阶段四的 Patch 应用和验证流程单独确认。
-

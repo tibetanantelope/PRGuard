@@ -1,0 +1,19 @@
+export function renderPrGuardAdmin(): string {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PRGuard Admin</title><style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f5f7fb;color:#172033}header{background:#172033;color:white;padding:20px 28px}main{max-width:1200px;margin:24px auto;padding:0 18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.card{background:white;border:1px solid #e3e8f0;border-radius:10px;padding:16px;box-shadow:0 2px 8px #17203312}.value{font-size:28px;font-weight:700;margin-top:8px}table{width:100%;border-collapse:collapse;background:white}.panel{margin-top:18px;overflow:auto}th,td{text-align:left;padding:11px;border-bottom:1px solid #edf0f5;font-size:14px}button{border:0;border-radius:6px;background:#2563eb;color:white;padding:8px 12px;cursor:pointer}input{padding:8px;border:1px solid #ccd5e2;border-radius:6px;width:280px}pre{white-space:pre-wrap;max-height:500px;overflow:auto;background:#111827;color:#d1e4ff;padding:14px;border-radius:8px}.muted{color:#667085}.error{color:#b42318}
+</style></head><body><header><strong>PRGuard Admin Console</strong><span class="muted" style="color:#c8d2e5;margin-left:12px">PR 风险治理与 Agent 运行控制台</span></header>
+<main><div class="card"><label>API Key（可选） <input id="key" type="password" placeholder="仅当服务启用认证时填写"></label> <button id="refresh">刷新</button><span id="message" class="muted" style="margin-left:12px"></span></div>
+<div class="grid" style="margin-top:18px"><div class="card"><div class="muted">任务总数</div><div id="jobCount" class="value">-</div></div><div class="card"><div class="muted">已完成</div><div id="completed" class="value">-</div></div><div class="card"><div class="muted">失败任务</div><div id="failed" class="value">-</div></div><div class="card"><div class="muted">风险 Finding</div><div id="findings" class="value">-</div></div></div>
+<section class="panel"><h2>Review Jobs</h2><table><thead><tr><th>Job ID</th><th>Status</th><th>来源</th><th>Attempts</th><th>更新时间</th><th></th></tr></thead><tbody id="jobs"></tbody></table></section>
+<section class="panel"><h2>Job Details</h2><pre id="detail">点击任务查看详情</pre></section>
+<section class="panel"><h2>Prometheus Metrics</h2><pre id="metrics">-</pre></section></main>
+<script>
+const $=id=>document.getElementById(id); const headers=()=>{const k=$('key').value.trim();return k?{'Authorization':'Bearer '+k}:{} };
+async function get(path){const r=await fetch(path,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+r.statusText);return r.json()}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function refresh(){try{const data=await get('/api/v1/review-jobs');const jobs=data.jobs||[];$('jobCount').textContent=jobs.length;$('completed').textContent=jobs.filter(j=>j.status==='completed').length;$('failed').textContent=jobs.filter(j=>j.status==='failed').length;$('findings').textContent=jobs.reduce((n,j)=>n+(j.result?.findings?.length||0),0);$('jobs').innerHTML=jobs.map(j=>'<tr><td>'+esc(j.jobId.slice(0,8))+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.input?.githubRef||j.input?.diffPath||'inline')+'</td><td>'+esc(j.attempts)+'</td><td>'+esc(j.updatedAt)+'</td><td><button data-id="'+esc(j.jobId)+'">查看</button></td></tr>').join('');document.querySelectorAll('[data-id]').forEach(b=>b.onclick=async()=>{$('detail').textContent=JSON.stringify(await get('/api/v1/review-jobs/'+b.dataset.id),null,2)});$('metrics').textContent=await (await fetch('/metrics',{headers:headers()})).text();$('message').textContent='已更新 '+new Date().toLocaleTimeString()}catch(e){$('message').textContent=e.message;$('message').className='error'}}
+$('refresh').onclick=refresh;refresh();setInterval(refresh,15000);
+</script></body></html>`
+}

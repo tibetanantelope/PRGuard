@@ -94,6 +94,7 @@ export async function generatePatch(
     async () => runtime,
   )
   const model = options.trace ? withTraceModel(baseModel, options.trace) : baseModel
+  const toolStartedAt = new Map<string, number>()
   const messages = await runAgentTurn({
     model,
     tools: readOnlyTools,
@@ -101,6 +102,7 @@ export async function generatePatch(
     maxSteps: options.maxSteps ?? 12,
     modelName: runtime.model,
     onToolStart: (toolName, input) => {
+      toolStartedAt.set(toolName, performance.now())
       void options.trace?.record('tool_started', {
         toolName,
         inputKeys: typeof input === 'object' && input !== null ? Object.keys(input) : [],
@@ -111,6 +113,7 @@ export async function generatePatch(
         toolName,
         ok: !isError,
         outputChars: output.length,
+        durationMs: Math.round(performance.now() - (toolStartedAt.get(toolName) ?? performance.now())),
       })
     },
     messages: [

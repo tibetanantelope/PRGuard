@@ -181,6 +181,7 @@ export function withTraceModel(
 ): ModelAdapter {
   return {
     async next(messages: ChatMessage[], options?: ModelRequestOptions): Promise<AgentStep> {
+      const startedAt = performance.now()
       await trace.record('model_request', {
         messageCount: messages.length,
         toolCount: options?.tools?.length ?? 0,
@@ -194,6 +195,8 @@ export function withTraceModel(
           contentChars: result.content?.length ?? 0,
           toolCallCount: result.type === 'tool_calls' ? result.calls.length : 0,
           stopReason: result.diagnostics?.stopReason,
+          durationMs: Math.round(performance.now() - startedAt),
+          usage: result.usage,
         })
         return result
       } catch (error) {

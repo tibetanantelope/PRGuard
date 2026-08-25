@@ -15,27 +15,14 @@ import {
   formatReviewResult,
   loadGithubPrDiffSnapshot,
   loadPrDiffSnapshot,
-  resumePrGuardReview,
-  runMultiAgentPrReview,
-  runPrReview,
 } from './prguard/index.js'
 import {
-  applyAndVerifyPatch,
   formatPatch,
-  generatePatch,
-} from './prguard/index.js'
-import {
-  createPrGuardTrace,
-  listPrGuardTraces,
-  loadPrGuardTrace,
-  replayPrGuardTrace,
 } from './prguard/index.js'
 import { reviewResultSchema } from './prguard/index.js'
-import {
-  evaluateDataset,
-  formatEvalReport,
-  loadEvalPredictions,
-} from './prguard/index.js'
+import { EvaluationService, RepairService, ReviewService, TraceService } from './prguard/services.js'
+import { startPrGuardServer } from './prguard/http.js'
+import { ReviewJobService, ReviewWorker } from './prguard/jobs.js'
 import { createInterface } from 'node:readline/promises'
 import process from 'node:process'
 
@@ -59,7 +46,10 @@ minicode pr trace list
 minicode pr trace show <run-id>
 minicode pr trace replay <run-id>
 minicode pr trace resume <run-id> [--multi-agent]
-minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--json]`)
+minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--json]
+GitHub PR reviews can use --github owner/repo#123 or https://github.com/owner/repo/pull/123.
+minicode pr serve [--host <host>] [--port <port>]
+minicode pr worker`)
 }
 
 function parseScope(args: string[]): {
@@ -304,10 +294,51 @@ async function handleSkillsCommand(cwd: string, args: string[]): Promise<boolean
 
 async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
   const [subcommand, ...rest] = args
+  if (subcommand === 'serve') {
+    const serveArgs = [...rest]
+    const host = takeOption(serveArgs, '--host') ?? '127.0.0.1'
+    const portText = takeOption(serveArgs, '--port')
+    const port = portText ? Number(portText) : 8787
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid --port value: ${portText ?? ''}`)
+    }
+    if (serveArgs.length > 0) throw new Error(`Unknown arguments: ${serveArgs.join(' ')}`)
+    const runtime = await loadRuntimeConfig()
+    const server = await startPrGuardServer({ runtime, host, port })
+    const address = server.address()
+    const displayPort = typeof address === 'object' && address ? address.port : port
+    console.log(`PRGuard API listening on http://${host}:${displayPort}`)
+    await new Promise<void>((resolve, reject) => {
+      server.once('close', resolve)
+      server.once('error', reject)
+    })
+    return true
+  }
+  if (subcommand === 'worker') {
+    if (rest.length > 0) throw new Error(`Unknown arguments: ${rest.join(' ')}`)
+    const runtime = await loadRuntimeConfig()
+    if (!runtime.prGuardRedisUrl) {
+      throw new Error('PRGuard worker requires PR_GUARD_REDIS_URL.')
+    }
+    const abort = new AbortController()
+    const stop = (): void => abort.abort()
+    process.once('SIGINT', stop)
+    process.once('SIGTERM', stop)
+    try {
+      console.log('PRGuard Review Worker started.')
+      await new ReviewWorker(new ReviewJobService(runtime)).run({ signal: abort.signal })
+    } finally {
+      process.off('SIGINT', stop)
+      process.off('SIGTERM', stop)
+    }
+    return true
+  }
   if (subcommand === 'eval') {
     const evalArgs = [...rest]
     const datasetPath = takeOption(evalArgs, '--dataset') ?? 'evals/tasks.jsonl'
     const predictionsPath = takeOption(evalArgs, '--predictions')
+    const compareBaseline = evalArgs.includes('--compare-baseline')
+    if (compareBaseline) evalArgs.splice(evalArgs.indexOf('--compare-baseline'), 1)
     const asJson = evalArgs.includes('--json')
     if (asJson) evalArgs.splice(evalArgs.indexOf('--json'), 1)
     const baseline = evalArgs.includes('--baseline')
@@ -321,20 +352,32 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     if (!baseline && !predictionsPath) {
       throw new Error('Evaluation requires --baseline or --predictions <file>.')
     }
-    const predictions = predictionsPath ? await loadEvalPredictions(predictionsPath) : undefined
-    const report = await evaluateDataset({
+    const evaluationService = new EvaluationService()
+    const report = await evaluationService.evaluate({
       datasetPath,
-      predictions,
+      predictionsPath,
       source: predictionsPath ? 'predictions' : 'baseline',
     })
-    console.log(asJson ? JSON.stringify(report, null, 2) : formatEvalReport(report))
+    if (compareBaseline && !predictionsPath) {
+      throw new Error('--compare-baseline requires --predictions <file>.')
+    }
+    if (compareBaseline) {
+      const baseline = await evaluationService.evaluate({ datasetPath, source: 'baseline' })
+      const comparison = evaluationService.compare(report, baseline)
+      console.log(asJson
+        ? JSON.stringify({ report, baseline, comparison }, null, 2)
+        : `${evaluationService.format(report)}\n\nComparison with rule baseline:\n${JSON.stringify(comparison.delta)}\nRegressions: ${comparison.regressions.length === 0 ? 'none' : comparison.regressions.join(', ')}`)
+    } else {
+      console.log(asJson ? JSON.stringify(report, null, 2) : evaluationService.format(report))
+    }
     return true
   }
 
   if (subcommand === 'trace') {
     const [traceCommand, runId] = rest
     if (traceCommand === 'list') {
-      const traces = await listPrGuardTraces()
+      const traceService = new TraceService()
+      const traces = await traceService.list()
       if (traces.length === 0) {
         console.log('No PRGuard traces found.')
         return true
@@ -351,14 +394,15 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
         throw new Error(`Unknown arguments: ${traceArgs.filter(arg => arg !== '--multi-agent').join(' ')}`)
       }
       const runtime = await loadRuntimeConfig()
-      const resumed = await resumePrGuardReview({ runId, runtime, multiAgent })
+      const resumed = await new ReviewService(runtime).resume(runId, multiAgent)
       console.log(`Resumed PRGuard run ${runId} as ${resumed.trace.runId}`)
       console.log(formatReviewResult(resumed.result))
       return true
     }
     if ((traceCommand === 'show' || traceCommand === 'replay') && runId) {
-      const events = await loadPrGuardTrace(runId)
-      console.log(replayPrGuardTrace(events))
+      const traceService = new TraceService()
+      const events = await traceService.load(runId)
+      console.log(traceService.replay(events))
       return true
     }
     printUsage()
@@ -389,13 +433,16 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
       testCommand,
     })
     const runtime = await loadRuntimeConfig()
-    const trace = await createPrGuardTrace(snapshot.input)
+    const reviewService = new ReviewService(runtime)
+    const repairService = new RepairService(runtime)
+    const traceService = new TraceService()
+    const trace = await traceService.create(snapshot.input)
     await trace.record('checkpoint', { phase: 'review_started' })
     let patch
     try {
       let review
       if (reviewRunId) {
-        const events = await loadPrGuardTrace(reviewRunId)
+        const events = await traceService.load(reviewRunId)
         const completed = [...events].reverse().find(event =>
           event.type === 'review_completed' && event.payload.result,
         )
@@ -405,10 +452,10 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
         review = reviewResultSchema.parse(completed.payload.result)
         await trace.record('checkpoint', { phase: 'review_reused', sourceRunId: reviewRunId })
       } else {
-        review = await runPrReview(snapshot, runtime, { trace })
+        review = await reviewService.review(snapshot, { trace })
       }
       await trace.record('checkpoint', { phase: 'review_ready' })
-      patch = await generatePatch(snapshot, review, [findingId], runtime, { trace })
+      patch = await repairService.generate(snapshot, review, [findingId], trace)
     } catch (error) {
       await trace.record('run_failed', {
         phase: 'repair_generation',
@@ -440,7 +487,7 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     }
 
     await trace.record('approval', { approved: true })
-    const applied = await applyAndVerifyPatch(cwd, patch, testCommand, { trace })
+    const applied = await repairService.apply(cwd, patch, testCommand, trace)
     await trace.record('run_finished', { status: applied.patch.status })
     await trace.flush()
     console.log(`\nPatch status: ${applied.patch.status}`)
@@ -491,12 +538,12 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
   }
 
   const runtime = await loadRuntimeConfig()
-  const trace = await createPrGuardTrace(snapshot.input)
+  const reviewService = new ReviewService(runtime)
+  const traceService = new TraceService()
+  const trace = await traceService.create(snapshot.input)
   let result
   try {
-    result = multiAgent
-      ? await runMultiAgentPrReview(snapshot, runtime, { trace })
-      : await runPrReview(snapshot, runtime, { trace })
+    result = await reviewService.review(snapshot, { multiAgent, trace })
     await trace.record('run_finished', { status: 'review_completed' })
     await trace.flush()
   } catch (error) {

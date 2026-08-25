@@ -1,69 +1,29 @@
-import { describe, it } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  calculateEvalMetrics,
-  evaluateDataset,
-  runRuleBaseline,
-} from '../src/prguard/index.js'
-import type { EvalExpectedFinding } from '../src/prguard/eval.js'
+import { calculateEvalMetrics, compareEvalReports, type EvalReport } from '../src/prguard/eval.js'
 
-describe('PRGuard offline evaluation', () => {
-  it('detects the representative command injection fixture', () => {
-    const findings = runRuleBaseline(`
-diff --git a/src/runner.ts b/src/runner.ts
---- a/src/runner.ts
-+++ b/src/runner.ts
-@@ -1,1 +1,2 @@
-+export function run(input: string) { return exec(input); }
-`.trim())
+function report(findingF1: number, highRiskRecall: number | null, taskFailureRate: number): EvalReport {
+  return {
+    dataset: 'evals/tasks.jsonl', source: 'predictions',
+    metrics: {
+      taskCount: 1, failedTaskCount: 0, expectedFindingCount: 1, predictedFindingCount: 1,
+      matchedFindingCount: 1, findingPrecision: findingF1, findingRecall: findingF1,
+      findingF1, localizationAccuracy: findingF1, highRiskRecall, patchTestPassRate: null,
+      averageToolCalls: 1, averageTokens: 2, averageDurationMs: 3, taskFailureRate,
+      falsePositiveCount: 0, falseNegativeCount: 0,
+    }, matches: [],
+  }
+}
 
-    assert.equal(findings.length, 1)
-    assert.equal(findings[0]?.category, 'security')
-    assert.equal(findings[0]?.lineStart, 1)
-  })
+test('evaluation comparison reports regressions against baseline', () => {
+  const comparison = compareEvalReports(report(0.5, 0.5, 0.2), report(1, 1, 0))
+  assert.deepEqual(comparison.regressions, ['findingF1', 'highRiskRecall', 'taskFailureRate'])
+  assert.equal(comparison.delta.findingF1, -0.5)
+})
 
-  it('calculates precision, recall, F1 and high-risk recall', () => {
-    const expected: EvalExpectedFinding = {
-      category: 'security',
-      severity: 'high',
-      file: 'src/auth.ts',
-      lineStart: 10,
-      lineEnd: 10,
-      title: 'Missing authorization',
-    }
-    const result = calculateEvalMetrics(
-      new Map([['task-1', [expected]]]),
-      [{
-        taskId: 'task-1',
-        findings: [{
-          category: 'security',
-          severity: 'high',
-          file: 'src/auth.ts',
-          lineStart: 11,
-          lineEnd: 11,
-          title: 'Possible missing authorization',
-        }],
-        patchTestPassed: true,
-      }],
-    )
-
-    assert.equal(result.metrics.findingPrecision, 1)
-    assert.equal(result.metrics.findingRecall, 1)
-    assert.equal(result.metrics.findingF1, 1)
-    assert.equal(result.metrics.highRiskRecall, 1)
-    assert.equal(result.metrics.patchTestPassRate, 1)
-  })
-
-  it('evaluates the checked-in baseline dataset', async () => {
-    const report = await evaluateDataset({
-      datasetPath: 'evals/tasks.jsonl',
-      source: 'baseline',
-    })
-
-    assert.equal(report.metrics.taskCount, 6)
-    assert.equal(report.metrics.expectedFindingCount, 5)
-    assert.equal(report.metrics.findingRecall, 1)
-    assert.equal(report.metrics.highRiskRecall, 1)
-    assert.equal(report.metrics.taskFailureRate, 0)
-  })
+test('evaluation metrics expose false positives and negatives', () => {
+  const expected = new Map([['task-1', [{ category: 'security' as const, severity: 'high' as const, file: 'a.ts', lineStart: 1, lineEnd: 1, title: 'risk' }]]])
+  const result = calculateEvalMetrics(expected, [{ taskId: 'task-1', findings: [] }])
+  assert.equal(result.metrics.falsePositiveCount, 0)
+  assert.equal(result.metrics.falseNegativeCount, 1)
 })

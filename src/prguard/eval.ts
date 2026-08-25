@@ -63,6 +63,8 @@ export type EvalMetrics = {
   averageTokens: number
   averageDurationMs: number
   taskFailureRate: number
+  falsePositiveCount: number
+  falseNegativeCount: number
 }
 
 export type EvalReport = {
@@ -70,6 +72,13 @@ export type EvalReport = {
   source: 'baseline' | 'predictions'
   metrics: EvalMetrics
   matches: Array<{ taskId: string; matches: EvalMatch[] }>
+}
+
+export type EvalComparison = {
+  candidate: EvalMetrics
+  baseline: EvalMetrics
+  delta: Pick<EvalMetrics, 'findingPrecision' | 'findingRecall' | 'findingF1' | 'highRiskRecall' | 'patchTestPassRate' | 'taskFailureRate'>
+  regressions: string[]
 }
 
 const severityRank: Record<Severity, number> = {
@@ -184,9 +193,31 @@ export function calculateEvalMetrics(
       averageTokens: numberAverage(prediction => prediction.tokens),
       averageDurationMs: numberAverage(prediction => prediction.durationMs),
       taskFailureRate: ratio(predictions.filter(prediction => prediction.failed).length, predictions.length),
+      falsePositiveCount: Math.max(0, predictions.reduce((sum, entry) => sum + entry.findings.length, 0) - matched),
+      falseNegativeCount: Math.max(0, allExpected.length - matched),
     },
     matches,
   }
+}
+
+export function compareEvalReports(candidate: EvalReport, baseline: EvalReport): EvalComparison {
+  const delta = {
+    findingPrecision: candidate.metrics.findingPrecision - baseline.metrics.findingPrecision,
+    findingRecall: candidate.metrics.findingRecall - baseline.metrics.findingRecall,
+    findingF1: candidate.metrics.findingF1 - baseline.metrics.findingF1,
+    highRiskRecall: subtractNullable(candidate.metrics.highRiskRecall, baseline.metrics.highRiskRecall),
+    patchTestPassRate: subtractNullable(candidate.metrics.patchTestPassRate, baseline.metrics.patchTestPassRate),
+    taskFailureRate: candidate.metrics.taskFailureRate - baseline.metrics.taskFailureRate,
+  }
+  const regressions: string[] = []
+  if (delta.findingF1 < 0) regressions.push('findingF1')
+  if (delta.highRiskRecall !== null && delta.highRiskRecall < 0) regressions.push('highRiskRecall')
+  if (delta.taskFailureRate > 0) regressions.push('taskFailureRate')
+  return { candidate: candidate.metrics, baseline: baseline.metrics, delta, regressions }
+}
+
+function subtractNullable(left: number | null, right: number | null): number | null {
+  return left === null || right === null ? null : left - right
 }
 
 function addedLines(diffText: string): Array<{ file: string; line: number; text: string }> {
@@ -303,5 +334,6 @@ export function formatEvalReport(report: EvalReport): string {
     `Patch test pass rate: ${formatPercent(metrics.patchTestPassRate)}`,
     `Average tool calls: ${metrics.averageToolCalls.toFixed(1)}  Average tokens: ${metrics.averageTokens.toFixed(0)}`,
     `Average duration: ${metrics.averageDurationMs.toFixed(1)} ms  Task failure rate: ${formatPercent(metrics.taskFailureRate)}`,
+    `False positives: ${metrics.falsePositiveCount}  False negatives: ${metrics.falseNegativeCount}`,
   ].join('\n')
 }
