@@ -6,7 +6,7 @@ import { RepairService, ReviewService, TraceService } from './services.js'
 import { ReviewJobService, ReviewWorker } from './jobs.js'
 import { createDefaultReviewJobRepository, type ReviewJobRepository } from './job-repository.js'
 import { logPrGuardEvent, prGuardMetrics } from './observability.js'
-import { loadGithubPrDiffSnapshot, parseGithubWebhookEvent, verifyGithubWebhookSignature } from './github.js'
+import { FileGithubWebhookDeliveryStore, loadGithubPrDiffSnapshot, parseGithubWebhookEvent, verifyGithubWebhookSignature, type GithubWebhookDeliveryStore } from './github.js'
 import { timingSafeEqual } from 'node:crypto'
 import { renderPrGuardAdmin } from './admin.js'
 
@@ -19,6 +19,7 @@ export type PrGuardServerOptions = {
   traceBaseDir?: string
   jobBaseDir?: string
   jobRepository?: ReviewJobRepository
+  githubDeliveryStore?: GithubWebhookDeliveryStore
 }
 
 type JsonRecord = Record<string, unknown>
@@ -81,6 +82,11 @@ function errorMessage(error: unknown): string {
 }
 
 export function createPrGuardServer(options: PrGuardServerOptions): http.Server {
+  const bindHost = options.host ?? '127.0.0.1'
+  const isLoopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1'
+  if (!isLoopback && !options.runtime.prGuardApiKey) {
+    throw new Error('Refusing to bind PRGuard API outside loopback without PR_GUARD_API_KEY.')
+  }
   const reviewService = new ReviewService(options.runtime)
   const repairService = new RepairService(options.runtime)
   const traceService = new TraceService(options.traceBaseDir)
@@ -89,10 +95,16 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
     options.runtime.prGuardMySqlUrl,
   )
   const jobService = new ReviewJobService(options.runtime, jobRepository, options.traceBaseDir)
+  const githubDeliveryStore = options.githubDeliveryStore ?? new FileGithubWebhookDeliveryStore(
+    options.jobBaseDir ? `${options.jobBaseDir}/github-deliveries.json` : undefined,
+  )
   const workerAbort = new AbortController()
   const rateLimiter = new FixedWindowRateLimiter(options.runtime.prGuardRateLimitPerMinute ?? 120)
   if (!options.runtime.prGuardRedisUrl) {
-    void new ReviewWorker(jobService).run({ signal: workerAbort.signal })
+    void new ReviewWorker(jobService).run({
+      signal: workerAbort.signal,
+      reclaimIdleMs: options.runtime.prGuardRedisReclaimIdleMs,
+    })
   }
 
   const server = http.createServer(async (req, res) => {
@@ -100,6 +112,7 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
       const url = new URL(req.url ?? '/', 'http://localhost')
       const method = req.method ?? 'GET'
       const isHealth = method === 'GET' && url.pathname === '/healthz'
+      const isReady = method === 'GET' && url.pathname === '/readyz'
       const isWebhook = method === 'POST' && url.pathname === '/api/v1/github/webhook'
       const isAdminPage = method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')
       const client = req.socket.remoteAddress ?? 'unknown'
@@ -109,13 +122,16 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
         json(res, 429, { error: 'Rate limit exceeded. Try again later.' })
         return
       }
-      if (options.runtime.prGuardApiKey && !isHealth && !isWebhook && !isAdminPage && !hasApiKey(req, options.runtime.prGuardApiKey)) {
+      if (options.runtime.prGuardApiKey && !isHealth && !isReady && !isWebhook && !isAdminPage && !hasApiKey(req, options.runtime.prGuardApiKey)) {
         prGuardMetrics.increment('prguard_auth_failures_total')
         logPrGuardEvent('api_auth_failed', { client, method, route: url.pathname })
         json(res, 401, { error: 'Authentication required.' })
         return
       }
       const requestStartedAt = performance.now()
+      res.setHeader('x-content-type-options', 'nosniff')
+      res.setHeader('x-frame-options', 'DENY')
+      res.setHeader('referrer-policy', 'no-referrer')
       res.once('finish', () => {
         prGuardMetrics.increment('prguard_http_requests_total', { method, route: url.pathname, status: String(res.statusCode) })
         prGuardMetrics.observe('prguard_http_request_duration_ms', performance.now() - requestStartedAt, { method, route: url.pathname })
@@ -125,6 +141,18 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
         res.statusCode = 200
         res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8')
         res.end(prGuardMetrics.renderPrometheus())
+        return
+      }
+
+      if (isReady) {
+        json(res, 200, {
+          status: 'ready',
+          service: 'prguard',
+          dependencies: {
+            queue: options.runtime.prGuardRedisUrl ? 'redis' : 'memory',
+            persistence: options.runtime.prGuardMySqlUrl ? 'mysql' : 'file',
+          },
+        })
         return
       }
 
@@ -152,7 +180,16 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
           return
         }
         const eventName = String(req.headers['x-github-event'] ?? '')
-        const payload = JSON.parse(body.toString('utf8')) as { action?: string }
+        const deliveryIdHeader = req.headers['x-github-delivery']
+        const deliveryId = Array.isArray(deliveryIdHeader) ? deliveryIdHeader[0] : deliveryIdHeader
+        if (deliveryId) {
+          const claimed = await githubDeliveryStore.claim(deliveryId)
+          if (!claimed) {
+            json(res, 202, { accepted: true, duplicate: true, deliveryId })
+            return
+          }
+        }
+        const payload = JSON.parse(body.toString('utf8')) as { action?: string; pull_request?: { head?: { sha?: string } } }
         const supportedActions = new Set(['opened', 'reopened', 'synchronize'])
         if (eventName !== 'pull_request' || !supportedActions.has(payload.action ?? '')) {
           json(res, 202, { accepted: true, ignored: true, reason: 'event_not_supported' })
@@ -166,6 +203,7 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
         const snapshot = await loadGithubPrDiffSnapshot({
           cwd: options.runtime.prGuardGithubWorkspace,
           githubRef: `${reference.owner}/${reference.repo}#${reference.number}`,
+          githubSha: payload.pull_request?.head?.sha,
           token: options.runtime.prGuardGithubToken,
         })
         const job = await jobService.create(snapshot, true)
@@ -223,6 +261,11 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
             return
           }
 
+          await trace.record('approval', {
+            approved: true,
+            source: 'api_request',
+            findingIds,
+          })
           const result = await repairService.apply(snapshot.input.cwd, patch, testCommand, trace)
           await trace.record('run_finished', { status: result.patch.status, findingIds: patch.findingIds })
           await trace.flush()

@@ -13,6 +13,8 @@ const job: ReviewJob = {
   cwd: 'D:/workspace/demo',
   createdAt: '2026-08-23T00:00:00.000Z',
   updatedAt: '2026-08-23T00:00:00.000Z',
+  attempts: 0,
+  maxAttempts: 3,
 }
 
 describe('PRGuard job repositories', () => {
@@ -28,6 +30,24 @@ describe('PRGuard job repositories', () => {
       assert.equal((await repository.list())[0]?.status, 'completed')
       await repository.touch(job.jobId, '2026-08-23T00:02:00.000Z')
       assert.equal((await repository.get(job.jobId)).status, 'completed')
+    } finally {
+      await rm(baseDir, { recursive: true, force: true })
+    }
+  })
+
+  it('claims a queued job once and does not reclaim a running job', async () => {
+    const baseDir = await mkdtemp(path.join(os.tmpdir(), 'prguard-job-claim-'))
+    try {
+      const repository = new FileReviewJobRepository(baseDir)
+      await repository.create(job)
+      const claimed = await repository.claim(job.jobId, '2026-08-23T00:03:00.000Z', 30_000)
+      assert.equal(claimed?.status, 'running')
+      assert.equal(claimed?.attempts, 1)
+      assert.equal(await repository.claim(job.jobId, '2026-08-23T00:03:00.001Z', 30_000), null)
+      await repository.update({ ...claimed!, updatedAt: '2026-08-23T00:03:00.000Z' })
+      const recovered = await repository.claim(job.jobId, '2026-08-23T00:04:00.000Z', 30_000)
+      assert.equal(recovered?.status, 'running')
+      assert.equal(recovered?.attempts, 2)
     } finally {
       await rm(baseDir, { recursive: true, force: true })
     }

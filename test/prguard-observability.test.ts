@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PrGuardMetrics } from '../src/prguard/observability.js'
+import { PrGuardMetrics, prGuardMetrics, startPrGuardMetricsServer } from '../src/prguard/observability.js'
 
 test('prometheus metrics aggregate counters, durations, and trace usage', () => {
   const metrics = new PrGuardMetrics()
@@ -22,4 +22,18 @@ test('prometheus metrics aggregate counters, durations, and trace usage', () => 
   assert.match(output, /prguard_model_tokens_total\{direction="input"\} 10/)
   assert.match(output, /prguard_tool_calls_total\{tool="read_file",status="success"\} 1/)
   assert.match(output, /prguard_model_request_duration_ms_sum 20/)
+})
+
+test('worker metrics server exposes the process-local Prometheus registry', async () => {
+  prGuardMetrics.increment('worker_example_total', { status: 'ok' })
+  const server = await startPrGuardMetricsServer({ port: 0 })
+  try {
+    const address = server.address()
+    assert.equal(typeof address, 'object')
+    const response = await fetch(`http://127.0.0.1:${(address as { port: number }).port}/metrics`)
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /worker_example_total/)
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 })

@@ -39,7 +39,19 @@ npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --json
 # 将模型预测与规则基线进行对比
 npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --compare-baseline
 npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --compare-baseline --json
+
+# 作为 CI 回归门禁：失败时返回非 0 退出码
+npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --gate --min-f1 0.70 --min-high-risk-recall 0.90 --max-failure-rate 0.10 --json
 ```
+
+`--gate` 会自动与规则基线比较，并检查显式阈值。支持的阈值参数为：
+
+- `--min-f1 <0..1>`：Finding F1 最低值；
+- `--min-high-risk-recall <0..1>`：高风险 Finding 召回率最低值；
+- `--min-patch-pass-rate <0..1>`：Patch 测试通过率最低值；
+- `--max-failure-rate <0..1>`：任务失败率最高值。
+
+预测文件必须为数据集中的每个任务提供且仅提供一条记录；缺失任务、重复任务和未知任务都会直接使评测失败。这样模型、Prompt 或规则升级后，可以在 CI 中阻止指标回退。
 
 ## 指标定义
 

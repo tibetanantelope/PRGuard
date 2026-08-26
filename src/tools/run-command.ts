@@ -234,6 +234,7 @@ export const runCommandTool: ToolDefinition<Input> = {
       cwd: effectiveCwd,
       maxBuffer: 1024 * 1024,
       env: process.env,
+      signal: context.signal,
     })
 
     return {

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { calculateEvalMetrics, compareEvalReports, type EvalReport } from '../src/prguard/eval.js'
+import { calculateEvalMetrics, compareEvalReports, evaluateDataset, evaluateGate, type EvalReport } from '../src/prguard/eval.js'
 
 function report(findingF1: number, highRiskRecall: number | null, taskFailureRate: number): EvalReport {
   return {
@@ -26,4 +26,24 @@ test('evaluation metrics expose false positives and negatives', () => {
   const result = calculateEvalMetrics(expected, [{ taskId: 'task-1', findings: [] }])
   assert.equal(result.metrics.falsePositiveCount, 0)
   assert.equal(result.metrics.falseNegativeCount, 1)
+})
+
+test('evaluation gate catches metric thresholds and baseline regressions', () => {
+  const result = evaluateGate(report(0.5, 0.5, 0.2), report(1, 1, 0), {
+    minFindingF1: 0.6,
+    maxTaskFailureRate: 0.1,
+  })
+  assert.equal(result.passed, false)
+  assert.match(result.failures.join('\n'), /findingF1|taskFailureRate|baseline regression/)
+})
+
+test('evaluation rejects incomplete prediction files', async () => {
+  await assert.rejects(
+    () => evaluateDataset({
+      datasetPath: 'evals/tasks.jsonl',
+      source: 'predictions',
+      predictions: [{ taskId: 'command-injection', findings: [] }],
+    }),
+    /Missing evaluation predictions/,
+  )
 })

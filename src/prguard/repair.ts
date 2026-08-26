@@ -1,4 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import { AnthropicModelAdapter } from '../anthropic-adapter.js'
@@ -26,6 +29,7 @@ export type PatchApplicationResult = {
     status: 'passed' | 'failed'
     command: string
     output: string
+    timedOut?: boolean
   }
 }
 
@@ -209,6 +213,9 @@ async function applyPatchText(cwd: string, patchText: string): Promise<void> {
 }
 
 function splitCommand(commandLine: string): [string, string[]] {
+  if (/[\r\n;&|<>`$]/.test(commandLine)) {
+    throw new Error('Verification command contains disallowed shell characters.')
+  }
   const parts = commandLine.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(part =>
     part.replace(/^(["'])(.*)\1$/, '$2'),
   ) ?? []
@@ -220,7 +227,8 @@ function splitCommand(commandLine: string): [string, string[]] {
 export async function runVerificationCommand(
   cwd: string,
   commandLine: string,
-): Promise<{ passed: boolean; output: string }> {
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<{ passed: boolean; output: string; timedOut?: boolean }> {
   const [command, args] = splitCommand(commandLine)
   const allowedCommands = new Set([
     'npm',
@@ -248,59 +256,101 @@ export async function runVerificationCommand(
       cwd,
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
+      timeout: options.timeoutMs ?? 120_000,
+      killSignal: 'SIGTERM',
+      signal: options.signal,
     })
     return {
       passed: true,
       output: [result.stdout, result.stderr].filter(Boolean).join('\n').trim(),
     }
   } catch (error) {
-    const detail = error as { stdout?: string; stderr?: string; message?: string }
+    const detail = error as { stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string }
     return {
       passed: false,
       output: [detail.stdout, detail.stderr, detail.message].filter(Boolean).join('\n').trim(),
+      timedOut: detail.killed === true || detail.signal === 'SIGTERM',
     }
   }
+}
+
+async function createVerificationWorktree(cwd: string): Promise<string> {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'prguard-worktree-'))
+  const worktree = path.join(parent, 'repo')
+  try {
+    const result = await runGitCommand(cwd, ['worktree', 'add', '--detach', worktree, 'HEAD'])
+    if (result.stderr.trim()) {
+      // Git may report normal progress on stderr; only the exit code is authoritative.
+    }
+    return worktree
+  } catch (error) {
+    await rm(parent, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function removeVerificationWorktree(cwd: string, worktree: string): Promise<void> {
+  await runGitCommand(cwd, ['worktree', 'remove', '--force', worktree]).catch(() => undefined)
+  await rm(path.dirname(worktree), { recursive: true, force: true })
 }
 
 export async function applyAndVerifyPatch(
   cwd: string,
   patch: Patch,
   testCommand: string,
-  options: { trace?: PrGuardTrace } = {},
+  options: { trace?: PrGuardTrace; verificationTimeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<PatchApplicationResult> {
   validatePatchPaths(patch.unifiedDiff)
   await ensureCleanWorktree(cwd)
-  await applyPatchText(cwd, patch.unifiedDiff)
-  await options.trace?.record('patch_applied', {
-    findingIds: patch.findingIds,
-    files: patch.files,
+  const worktree = await createVerificationWorktree(cwd)
+  await options.trace?.record('checkpoint', {
+    phase: 'repair_verification_workspace_created',
+    isolated: true,
   })
+  try {
+    await applyPatchText(worktree, patch.unifiedDiff)
+    const verification = await runVerificationCommand(worktree, testCommand, {
+      timeoutMs: options.verificationTimeoutMs,
+      signal: options.signal,
+    })
+    await options.trace?.record('verification', {
+      status: verification.passed ? 'passed' : 'failed',
+      command: testCommand,
+      outputChars: verification.output.length,
+      isolated: true,
+      timedOut: verification.timedOut === true,
+    })
 
-  const verification = await runVerificationCommand(cwd, testCommand)
-  await options.trace?.record('verification', {
-    status: verification.passed ? 'passed' : 'failed',
-    command: testCommand,
-    outputChars: verification.output.length,
-  })
+    if (!verification.passed) {
+      await options.trace?.record('rollback', {
+        status: 'completed',
+        reason: verification.timedOut ? 'verification_timed_out' : 'verification_failed',
+        isolated: true,
+      })
+      return {
+        patch: patchSchema.parse({ ...patch, status: 'rolled_back' }),
+        verification: { status: 'failed', command: testCommand, output: verification.output, timedOut: verification.timedOut },
+      }
+    }
 
-  if (verification.passed) {
+    // Re-check before changing the user's worktree. A concurrent edit must never be overwritten.
+    await ensureCleanWorktree(cwd)
+    await applyPatchText(cwd, patch.unifiedDiff)
+    await options.trace?.record('patch_applied', {
+      findingIds: patch.findingIds,
+      files: patch.files,
+      verificationWorkspace: 'isolated',
+    })
     return {
       patch: patchSchema.parse({ ...patch, status: 'applied' }),
       verification: { status: 'passed', command: testCommand, output: verification.output },
     }
-  }
-
-  const reverted = await runGitWithPatch(cwd, ['apply', '-R', '-'], patch.unifiedDiff)
-  if (reverted.code !== 0) {
-    throw new Error(`Verification failed and automatic rollback failed: ${reverted.stderr || reverted.stdout}`.trim())
-  }
-  await options.trace?.record('rollback', {
-    status: 'completed',
-    reason: 'verification_failed',
-  })
-  return {
-    patch: patchSchema.parse({ ...patch, status: 'rolled_back' }),
-    verification: { status: 'failed', command: testCommand, output: verification.output },
+  } finally {
+    await removeVerificationWorktree(cwd, worktree)
+    await options.trace?.record('checkpoint', {
+      phase: 'repair_verification_workspace_removed',
+      isolated: true,
+    })
   }
 }
 

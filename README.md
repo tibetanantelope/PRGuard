@@ -212,6 +212,10 @@ npm run check
 npm test
 ```
 
+## PRGuard Project
+
+This repository also contains PRGuard, a production-oriented PR risk governance and security repair Agent built on top of the MiniCode runtime. See the [PRGuard project README](./PRGUARD_README.md), [architecture](./docs/PRGUARD_ARCHITECTURE.md), [demo runbook](./docs/PRGUARD_DEMO_RUNBOOK.md), and [resume description](./docs/PRGUARD_RESUME.md).
+
  ## PRGuard local review demo
 
 MiniCode is intentionally small and pragmatic. The goal is to keep the architecture understandable, hackable, and easy to extend.

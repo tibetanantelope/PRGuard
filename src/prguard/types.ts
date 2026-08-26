@@ -96,6 +96,7 @@ export const reviewInputSchema = z.object({
   headRef: z.string().min(1).optional(),
   diffPath: z.string().min(1).optional(),
   githubRef: z.string().min(1).optional(),
+  githubSha: z.string().regex(/^[0-9a-f]{7,64}$/i).optional(),
   diffText: z.string().min(1).optional(),
   testCommand: z.string().min(1).optional(),
 })
@@ -172,6 +173,12 @@ export const reviewResultSchema = z.object({
   input: reviewInputSchema,
   findings: z.array(findingSchema),
   summary: reviewSummarySchema,
+  evidenceVerification: z.object({
+    checkedFindingCount: z.number().int().nonnegative(),
+    acceptedFindingCount: z.number().int().nonnegative(),
+    rejectedFindingCount: z.number().int().nonnegative(),
+    rejectedFindingIds: z.array(z.string().min(1)),
+  }).optional(),
   patch: patchSchema.optional(),
 })
 

@@ -31,11 +31,15 @@ export type RuntimeConfig = {
   sourceSummary: string
   prGuardMySqlUrl?: string
   prGuardRedisUrl?: string
+  prGuardRedisReclaimIdleMs?: number
+  prGuardWorkerMetricsPort?: number
   prGuardMaxAttempts?: number
   prGuardReviewTimeoutMs?: number
+  prGuardVerificationTimeoutMs?: number
   prGuardGithubToken?: string
   prGuardGithubWebhookSecret?: string
   prGuardGithubWorkspace?: string
+  prGuardGithubFeedbackEnabled?: boolean
   prGuardApiKey?: string
   prGuardRateLimitPerMinute?: number
 }
@@ -272,11 +276,15 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
   const apiKey = String(env.ANTHROPIC_API_KEY ?? '').trim() || undefined
   const prGuardMySqlUrl = String(env.PR_GUARD_MYSQL_URL ?? '').trim() || undefined
   const prGuardRedisUrl = String(env.PR_GUARD_REDIS_URL ?? '').trim() || undefined
+  const prGuardRedisReclaimIdleMs = parsePositiveInteger(env.PR_GUARD_REDIS_RECLAIM_IDLE_MS, 30_000)
+  const prGuardWorkerMetricsPort = parsePositiveInteger(env.PR_GUARD_WORKER_METRICS_PORT, 9091)
   const prGuardMaxAttempts = parsePositiveInteger(env.PR_GUARD_MAX_ATTEMPTS, 3)
   const prGuardReviewTimeoutMs = parsePositiveInteger(env.PR_GUARD_REVIEW_TIMEOUT_MS, 120_000)
+  const prGuardVerificationTimeoutMs = parsePositiveInteger(env.PR_GUARD_VERIFICATION_TIMEOUT_MS, 120_000)
   const prGuardGithubToken = String(env.GITHUB_TOKEN ?? env.GH_TOKEN ?? '').trim() || undefined
   const prGuardGithubWebhookSecret = String(env.PR_GUARD_GITHUB_WEBHOOK_SECRET ?? '').trim() || undefined
   const prGuardGithubWorkspace = String(env.PR_GUARD_GITHUB_WORKSPACE ?? '').trim() || undefined
+  const prGuardGithubFeedbackEnabled = String(env.PR_GUARD_GITHUB_FEEDBACK_ENABLED ?? '').trim().toLowerCase() === 'true'
   const prGuardApiKey = String(env.PR_GUARD_API_KEY ?? '').trim() || undefined
   const prGuardRateLimitPerMinute = parsePositiveInteger(env.PR_GUARD_RATE_LIMIT_PER_MINUTE, 120)
   const rawMaxOutputTokens =
@@ -312,11 +320,15 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     sourceSummary: `config: ${PROJECT_ENV_PATH} > ${MINI_CODE_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env`,
     prGuardMySqlUrl,
     prGuardRedisUrl,
+    prGuardRedisReclaimIdleMs,
+    prGuardWorkerMetricsPort,
     prGuardMaxAttempts,
     prGuardReviewTimeoutMs,
+    prGuardVerificationTimeoutMs,
     prGuardGithubToken,
     prGuardGithubWebhookSecret,
     prGuardGithubWorkspace,
+    prGuardGithubFeedbackEnabled,
     prGuardApiKey,
     prGuardRateLimitPerMinute,
   }

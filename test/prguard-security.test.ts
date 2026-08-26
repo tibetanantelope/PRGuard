@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { describe, it } from 'node:test'
-import { createPrGuardServer } from '../src/prguard/http.js'
+import { createPrGuardServer, startPrGuardServer } from '../src/prguard/http.js'
 import type { RuntimeConfig } from '../src/config.js'
 
 const runtime: RuntimeConfig = {
@@ -25,5 +25,23 @@ describe('PRGuard security controls', () => {
       assert.equal((await fetch(`http://127.0.0.1:${listener.port}/api/v1/review-jobs`)).status, 401)
       assert.equal((await fetch(`http://127.0.0.1:${listener.port}/api/v1/review-jobs`, { headers: { Authorization: 'Bearer test-api-key' } })).status, 200)
     } finally { await listener.close() }
+  })
+
+  it('exposes readiness and refuses insecure non-loopback binding', async () => {
+    const readinessRuntime = { ...runtime, prGuardApiKey: 'test-key' }
+    const server = await startPrGuardServer({ runtime: readinessRuntime, host: '127.0.0.1', port: 0 })
+    try {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      const response = await fetch(`http://127.0.0.1:${port}/readyz`)
+      assert.equal(response.status, 200)
+      assert.equal((await response.json() as { status: string }).status, 'ready')
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+    assert.throws(
+      () => createPrGuardServer({ runtime: { ...runtime, prGuardApiKey: undefined }, host: '0.0.0.0', port: 0 }),
+      /outside loopback/,
+    )
   })
 })

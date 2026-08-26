@@ -55,6 +55,26 @@ describe('PRGuard repair', () => {
     assert.match(result.output, /\d+\.\d+\.\d+/)
   })
 
+  it('rejects shell metacharacters in verification commands', async () => {
+    await assert.rejects(
+      () => runVerificationCommand(process.cwd(), 'node verify.mjs && echo unsafe'),
+      /disallowed shell characters/,
+    )
+  })
+
+  it('times out verification in the isolated worktree and leaves the source unchanged', async () => {
+    const cwd = await createRepairRepo(true, true)
+    try {
+      const direct = await runVerificationCommand(cwd, 'node slow.mjs', { timeoutMs: 20 })
+      assert.equal(direct.passed, false)
+      const result = await applyAndVerifyPatch(cwd, makePatch(), 'node slow.mjs', { verificationTimeoutMs: 20 })
+      assert.equal(result.patch.status, 'rolled_back')
+      assert.equal(normalizeNewlines(await readFile(path.join(cwd, 'src', 'app.js'), 'utf8')), "export const value = 'bad'\n")
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('applies a patch and keeps it when verification passes', async () => {
     const cwd = await createRepairRepo()
     try {
@@ -93,13 +113,16 @@ describe('PRGuard repair', () => {
   })
 })
 
-async function createRepairRepo(verificationPasses = true): Promise<string> {
+async function createRepairRepo(verificationPasses = true, includeSlow = false): Promise<string> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'prguard-repair-'))
   await writeFile(path.join(cwd, 'verify.mjs'), verificationPasses
     ? "import { readFile } from 'node:fs/promises'; if ((await readFile('src/app.js', 'utf8')).replaceAll('\\r\\n', '\\n') !== \"export const value = 'fixed'\\n\") process.exit(1)\n"
     : 'process.exit(1)\n')
   await mkdir(path.join(cwd, 'src'))
   await writeFile(path.join(cwd, 'src', 'app.js'), "export const value = 'bad'\n")
+  if (includeSlow) {
+    await writeFile(path.join(cwd, 'slow.mjs'), 'setTimeout(() => process.exit(0), 1000)\n')
+  }
   for (const args of [
     ['init'],
     ['add', '.'],

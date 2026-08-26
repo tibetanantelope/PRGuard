@@ -9,6 +9,7 @@ import { withTraceModel, type PrGuardTrace } from './trace.js'
 import { findingSchema, reviewResultSchema, type Finding, type PrDiffSnapshot, type ReviewResult } from './types.js'
 import { buildPrReviewSystemPrompt, buildPrReviewUserPrompt } from './review-prompt.js'
 import { applyDeterministicRules } from './rules.js'
+import { verifyReviewEvidence } from './evidence-verifier.js'
 
 const modelEvidenceSchema = z.object({
   source: z.enum(['diff', 'repository', 'code', 'dependency', 'configuration', 'test']),
@@ -197,6 +198,7 @@ export async function runPrReview(
     model?: ModelAdapter
     maxSteps?: number
     trace?: PrGuardTrace
+    signal?: AbortSignal
     role?: string
     skillName?: string
     focus?: string
@@ -224,6 +226,7 @@ export async function runPrReview(
     cwd: snapshot.input.cwd,
     maxSteps: options.maxSteps ?? 12,
     modelName: runtime.model,
+    signal: options.signal,
     onToolStart: (toolName, input) => {
       toolStartedAt.set(toolName, performance.now())
       void options.trace?.record('tool_started', {
@@ -272,6 +275,7 @@ export async function runPrReview(
       cwd: snapshot.input.cwd,
       maxSteps: 2,
       modelName: runtime.model,
+      signal: options.signal,
       messages: [
         {
           role: 'system',
@@ -305,11 +309,21 @@ export async function runPrReview(
     result = parseModelReviewOutput(retryFinalMessage.content, snapshot)
   }
   result = applyDeterministicRules(result, snapshot)
+  const evidenceVerification = verifyReviewEvidence(snapshot, result)
+  result = evidenceVerification.result
+  await options.trace?.record('checkpoint', {
+    phase: 'evidence_verification',
+    checkedFindingCount: evidenceVerification.summary.checkedFindingCount,
+    acceptedFindingCount: evidenceVerification.summary.acceptedFindingCount,
+    rejectedFindingCount: evidenceVerification.summary.rejectedFindingCount,
+    rejectedFindingIds: evidenceVerification.summary.rejectedFindingIds,
+  })
   await options.trace?.record('review_completed', {
     result,
     findingCount: result.findings.length,
     findingIds: result.findings.map(finding => finding.id),
     bySeverity: result.summary.bySeverity,
+    evidenceVerification: result.evidenceVerification,
   })
   return result
 }

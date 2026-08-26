@@ -1,7 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { fetchGithubPrDiff, parseGithubPrRef, parseGithubWebhookEvent, verifyGithubWebhookSignature } from '../src/prguard/index.js'
+import { fetchGithubPrDiff, FileGithubWebhookDeliveryStore, parseGithubPrRef, parseGithubWebhookEvent, publishGithubReviewFeedback, verifyGithubWebhookSignature } from '../src/prguard/index.js'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 describe('PRGuard GitHub input', () => {
   it('parses short and URL pull request references', () => {
@@ -47,5 +50,38 @@ describe('PRGuard GitHub input', () => {
       pull_request: { number: 42 },
     }), { owner: 'octo', repo: 'demo', number: 42 })
     assert.equal(parseGithubWebhookEvent({ action: 'opened' }), null)
+  })
+
+  it('claims each GitHub webhook delivery only once and persists the claim', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'prguard-delivery-'))
+    const filePath = path.join(dir, 'deliveries.json')
+    try {
+      const first = new FileGithubWebhookDeliveryStore(filePath)
+      assert.equal(await first.claim('delivery-001'), true)
+      assert.equal(await first.claim('delivery-001'), false)
+      const second = new FileGithubWebhookDeliveryStore(filePath)
+      assert.equal(await second.claim('delivery-001'), false)
+      assert.match(await readFile(filePath, 'utf8'), /delivery-001/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('publishes a Check Run and a PR comment with structured findings', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = []
+    await publishGithubReviewFeedback('octo/demo#42', 'abcdef1234567', {
+      findings: [{ severity: 'high', title: 'Command injection', file: 'src/run.ts', lineStart: 8 }],
+      summary: { totalFindings: 1 },
+    }, {
+      token: 'test-token',
+      fetchImpl: async (input, init) => {
+        requests.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
+        return new Response('{}', { status: 201 })
+      },
+    })
+    assert.equal(requests.length, 2)
+    assert.match(requests[0]!.url, /check-runs$/)
+    assert.equal(requests[0]!.body.head_sha, 'abcdef1234567')
+    assert.match(requests[1]!.url, /issues\/42\/comments$/)
   })
 })

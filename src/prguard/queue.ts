@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { createClient } from 'redis'
+import { prGuardMetrics } from './observability.js'
 
 export type ReviewQueueMessage = {
   messageId: string
@@ -9,6 +10,7 @@ export type ReviewQueueMessage = {
 export type ReviewJobQueue = {
   enqueue(jobId: string): Promise<void>
   consume(): Promise<ReviewQueueMessage | null>
+  heartbeat(message: ReviewQueueMessage): Promise<void>
   ack(message: ReviewQueueMessage): Promise<void>
   deadLetter(message: ReviewQueueMessage, jobId: string, error: string): Promise<void>
   close(): Promise<void>
@@ -19,12 +21,15 @@ export class InMemoryReviewJobQueue implements ReviewJobQueue {
 
   async enqueue(jobId: string): Promise<void> {
     this.pending.push(jobId)
+    prGuardMetrics.increment('prguard_queue_enqueued_total')
   }
 
   async consume(): Promise<ReviewQueueMessage | null> {
     const jobId = this.pending.shift()
     return jobId ? { messageId: `local-${randomUUID()}`, jobId } : null
   }
+
+  async heartbeat(_message: ReviewQueueMessage): Promise<void> {}
 
   async ack(_message: ReviewQueueMessage): Promise<void> {}
 
@@ -39,6 +44,8 @@ export type RedisReviewJobQueueOptions = {
   group?: string
   consumer?: string
   blockMs?: number
+  reclaimIdleMs?: number
+  reclaimCount?: number
 }
 
 export class RedisReviewJobQueue implements ReviewJobQueue {
@@ -52,10 +59,16 @@ export class RedisReviewJobQueue implements ReviewJobQueue {
   async enqueue(jobId: string): Promise<void> {
     await this.ensureReady()
     await this.client.xAdd(this.stream, '*', { jobId })
+    prGuardMetrics.increment('prguard_queue_enqueued_total')
   }
 
   async consume(): Promise<ReviewQueueMessage | null> {
     await this.ensureReady()
+    const reclaimed = await this.reclaimPending()
+    if (reclaimed) {
+      prGuardMetrics.increment('prguard_queue_reclaimed_total')
+      return reclaimed
+    }
     const result = await this.client.xReadGroup(
       this.group,
       this.consumer,
@@ -67,12 +80,21 @@ export class RedisReviewJobQueue implements ReviewJobQueue {
     if (!message) return null
     const jobId = message.message.jobId
     if (!jobId) throw new Error(`Redis message ${message.id} does not contain jobId`)
+    prGuardMetrics.increment('prguard_queue_consumed_total')
+    await this.refreshPendingMetric()
     return { messageId: message.id, jobId }
+  }
+
+  async heartbeat(message: ReviewQueueMessage): Promise<void> {
+    await this.ensureReady()
+    await this.client.xClaim(this.stream, this.group, this.consumer, 0, [message.messageId])
   }
 
   async ack(message: ReviewQueueMessage): Promise<void> {
     await this.ensureReady()
     await this.client.xAck(this.stream, this.group, message.messageId)
+    prGuardMetrics.increment('prguard_queue_acked_total')
+    await this.refreshPendingMetric()
   }
 
   async deadLetter(message: ReviewQueueMessage, jobId: string, error: string): Promise<void> {
@@ -82,6 +104,28 @@ export class RedisReviewJobQueue implements ReviewJobQueue {
       jobId,
       error,
     })
+    prGuardMetrics.increment('prguard_queue_dead_letter_total')
+  }
+
+  private async reclaimPending(): Promise<ReviewQueueMessage | null> {
+    const result = await this.client.xAutoClaim(
+      this.stream,
+      this.group,
+      this.consumer,
+      this.options.reclaimIdleMs ?? 30_000,
+      '0-0',
+      { COUNT: this.options.reclaimCount ?? 1 },
+    )
+    const message = result.messages.find(item => item !== null)
+    if (!message) return null
+    const jobId = message.message.jobId
+    if (!jobId) throw new Error(`Redis message ${message.id} does not contain jobId`)
+    return { messageId: message.id, jobId }
+  }
+
+  private async refreshPendingMetric(): Promise<void> {
+    const summary = await this.client.xPending(this.stream, this.group)
+    prGuardMetrics.set('prguard_queue_pending_jobs', summary.pending)
   }
 
   async close(): Promise<void> {
@@ -121,8 +165,11 @@ type RedisReadResult = Array<{
   messages: Array<{ id: string; message: Record<string, string> }>
 }>
 
-export function createDefaultReviewJobQueue(redisUrl?: string): ReviewJobQueue {
+export function createDefaultReviewJobQueue(
+  redisUrl?: string,
+  options: Omit<RedisReviewJobQueueOptions, 'url'> = {},
+): ReviewJobQueue {
   const url = redisUrl?.trim() || process.env.PR_GUARD_REDIS_URL?.trim()
   if (!url) return new InMemoryReviewJobQueue()
-  return new RedisReviewJobQueue({ url })
+  return new RedisReviewJobQueue({ url, ...options })
 }

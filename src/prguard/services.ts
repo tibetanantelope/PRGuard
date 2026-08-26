@@ -13,7 +13,7 @@ import {
   type PrGuardTraceEvent,
   type PrGuardTraceSummary,
 } from './trace.js'
-import { compareEvalReports, evaluateDataset, formatEvalReport, loadEvalPredictions, type EvalComparison, type EvalPrediction, type EvalReport } from './eval.js'
+import { compareEvalReports, evaluateDataset, evaluateGate, formatEvalReport, loadEvalPredictions, type EvalComparison, type EvalGateOptions, type EvalGateResult, type EvalPrediction, type EvalReport } from './eval.js'
 import { runMultiAgentPrReview } from './multi-review.js'
 import { resumePrGuardReview } from './recovery.js'
 import { runPrReview } from './review.js'
@@ -28,11 +28,11 @@ export class ReviewService {
 
   async review(
     snapshot: PrDiffSnapshot,
-    options: { multiAgent?: boolean; trace?: PrGuardTrace; jobId?: string } = {},
+    options: { multiAgent?: boolean; trace?: PrGuardTrace; jobId?: string; signal?: AbortSignal } = {},
   ): Promise<ReviewResult> {
     const result = await (options.multiAgent
-      ? runMultiAgentPrReview(snapshot, this.runtime, { trace: options.trace })
-      : runPrReview(snapshot, this.runtime, { trace: options.trace }))
+      ? runMultiAgentPrReview(snapshot, this.runtime, { trace: options.trace, signal: options.signal })
+      : runPrReview(snapshot, this.runtime, { trace: options.trace, signal: options.signal }))
     await this.persistence.saveReview({ jobId: options.jobId, snapshot, result })
     return result
   }
@@ -70,7 +70,10 @@ export class RepairService {
     testCommand: string,
     trace?: PrGuardTrace,
   ): Promise<PatchApplicationResult> {
-    return applyAndVerifyPatch(cwd, patch, testCommand, { trace })
+    return applyAndVerifyPatch(cwd, patch, testCommand, {
+      trace,
+      verificationTimeoutMs: this.runtime.prGuardVerificationTimeoutMs,
+    })
   }
 }
 
@@ -116,5 +119,9 @@ export class EvaluationService {
 
   compare(candidate: EvalReport, baseline: EvalReport): EvalComparison {
     return compareEvalReports(candidate, baseline)
+  }
+
+  gate(candidate: EvalReport, baseline?: EvalReport, options?: EvalGateOptions): EvalGateResult {
+    return evaluateGate(candidate, baseline, options)
   }
 }

@@ -1,5 +1,7 @@
 # PRGuard 后续开发路线
 
+> 本文件保留为历史阶段记录。当前实际执行计划请查看 [PRGUARD_DEVELOPMENT_PLAN.md](./PRGUARD_DEVELOPMENT_PLAN.md)，其中已将 Redis Streams 可靠消费、幂等、Worker 恢复和死信处理提升为第一阶段。
+
 > Current progress: Stages 1–12 completed. Stage 7 added MySQL business persistence; Stage 8 added structured logs and Prometheus metrics; Stage 9 added baseline comparison and evaluation regression checks; Stage 10 added GitHub PR input and signed webhook job intake; Stage 11 added API authentication, rate limiting, audit-safe logs, and graceful shutdown controls; Stage 12 added the lightweight Web Admin Console.
 
 PRGuard 当前已经完成阶段一至阶段五：Service 层、HTTP API、异步 Job、MySQL 持久化，以及 Redis Streams + Worker。

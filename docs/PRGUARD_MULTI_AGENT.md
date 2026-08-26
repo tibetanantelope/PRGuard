@@ -26,4 +26,18 @@ npm.cmd run dev -- pr review --diff change.diff --multi-agent --json
 关闭 `--multi-agent` 时仍然使用阶段三的单 Agent 基线，便于做成本、耗时和准确率对比。
 
 内置 Skill 位于 `.mini-code/skills/`，也可以通过现有的 `minicode skills add` 安装或替换项目级 Skill。
+# PRGuard 显式 Agent 编排
 
+多 Agent Review 采用“规划—并行专家—聚合—证据验收”的固定流程：
+
+```text
+Agent Plan
+  -> Security / Reliability / Code Quality specialists
+  -> Deduplication and confidence aggregation
+  -> Evidence Verifier
+  -> Human selects Finding IDs
+  -> Patch Agent
+  -> Isolated verification
+```
+
+每次运行的 Trace 会记录编排计划、专家成功/失败状态、聚合结果和证据验收结果。Evidence Verifier 会拒绝不指向变更文件、行号非法或 Diff 中不存在的 `diff` 证据，避免没有事实依据的 Finding 直接进入修复流程。

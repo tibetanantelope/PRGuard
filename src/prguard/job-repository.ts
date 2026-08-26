@@ -7,6 +7,7 @@ import type { ReviewJob } from './jobs.js'
 export type ReviewJobRepository = {
   create(job: ReviewJob): Promise<void>
   get(jobId: string): Promise<ReviewJob>
+  claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null>
   list(): Promise<ReviewJob[]>
   update(job: ReviewJob): Promise<void>
   touch(jobId: string, updatedAt: string): Promise<void>
@@ -31,6 +32,16 @@ export class FileReviewJobRepository implements ReviewJobRepository {
 
   async get(jobId: string): Promise<ReviewJob> {
     return JSON.parse(await readFile(this.filePath(jobId), 'utf8')) as ReviewJob
+  }
+
+  async claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null> {
+    const job = await this.get(jobId)
+    const staleBefore = Date.parse(updatedAt) - staleAfterMs
+    const staleRunning = job.status === 'running' && Date.parse(job.updatedAt) <= staleBefore
+    if (job.status !== 'queued' && !staleRunning) return null
+    const claimed = { ...job, status: 'running' as const, attempts: job.attempts + 1, updatedAt }
+    await this.write(claimed)
+    return claimed
   }
 
   async list(): Promise<ReviewJob[]> {
@@ -99,6 +110,20 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
     const row = rows[0]
     if (!row) throw new Error(`PRGuard job not found: ${jobId}`)
     return fromRow(row)
+  }
+
+  async claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null> {
+    validateJobId(jobId)
+    await this.ensureSchema()
+    const [result] = await this.pool.execute<import('mysql2/promise').ResultSetHeader>(
+      `UPDATE review_jobs
+       SET status = 'running', attempts = attempts + 1, updated_at = ?
+       WHERE id = ?
+         AND (status = 'queued' OR (status = 'running' AND updated_at <= ?))`,
+      [toMySqlDateTime(updatedAt), jobId, toMySqlDateTime(new Date(Date.parse(updatedAt) - staleAfterMs).toISOString())],
+    )
+    if (result.affectedRows === 0) return null
+    return this.get(jobId)
   }
 
   async list(): Promise<ReviewJob[]> {

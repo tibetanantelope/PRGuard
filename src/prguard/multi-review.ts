@@ -127,13 +127,19 @@ export function aggregateAgentReviews(
 export async function runMultiAgentPrReview(
   snapshot: PrDiffSnapshot,
   runtime: RuntimeConfig,
-  options: { model?: ModelAdapter; maxSteps?: number; trace?: PrGuardTrace } = {},
+  options: { model?: ModelAdapter; maxSteps?: number; trace?: PrGuardTrace; signal?: AbortSignal } = {},
 ): Promise<MultiAgentReviewResult> {
+  await options.trace?.record('checkpoint', {
+    phase: 'agent_plan_created',
+    strategy: 'parallel_specialists_then_aggregation',
+    roles: prGuardAgentRoles.map(role => ({ name: role.name, skillName: role.skillName, focus: role.focus })),
+  })
   const settled = await Promise.allSettled(prGuardAgentRoles.map(role =>
     runPrReview(snapshot, runtime, {
       model: options.model,
       maxSteps: options.maxSteps,
       trace: options.trace,
+      signal: options.signal,
       role: role.name,
       skillName: role.skillName,
       focus: role.focus,
@@ -153,6 +159,11 @@ export async function runMultiAgentPrReview(
         failed: result.reason instanceof Error ? result.reason.message : String(result.reason),
       })
     }
+  })
+  await options.trace?.record('checkpoint', {
+    phase: 'agent_plan_completed',
+    roles: reports,
+    successfulAgents: reviews.length,
   })
   if (reviews.length === 0) {
     throw new Error('All PRGuard specialist agents failed.')

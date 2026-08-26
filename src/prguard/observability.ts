@@ -1,3 +1,4 @@
+import http from 'node:http'
 import type { PrGuardTraceEvent } from './trace.js'
 
 type Labels = Record<string, string>
@@ -9,6 +10,7 @@ function key(name: string, labels: Labels): string {
 export class PrGuardMetrics {
   private readonly counters = new Map<string, { name: string; labels: Labels; value: number }>()
   private readonly histograms = new Map<string, { name: string; labels: Labels; count: number; sum: number }>()
+  private readonly gauges = new Map<string, { name: string; labels: Labels; value: number }>()
 
   increment(name: string, labels: Labels = {}, value = 1): void {
     const id = key(name, labels)
@@ -23,6 +25,10 @@ export class PrGuardMetrics {
     metric.count += 1
     metric.sum += Math.max(0, value)
     this.histograms.set(id, metric)
+  }
+
+  set(name: string, value: number, labels: Labels = {}): void {
+    this.gauges.set(key(name, labels), { name, labels, value: Math.max(0, value) })
   }
 
   recordTrace(events: PrGuardTraceEvent[]): void {
@@ -56,6 +62,9 @@ export class PrGuardMetrics {
       lines.push(`${metric.name}_count${formatLabels(metric.labels)} ${metric.count}`)
       lines.push(`${metric.name}_sum${formatLabels(metric.labels)} ${metric.sum}`)
     }
+    for (const metric of this.gauges.values()) {
+      lines.push(`${metric.name}${formatLabels(metric.labels)} ${metric.value}`)
+    }
     return `${lines.join('\n')}\n`
   }
 }
@@ -67,15 +76,57 @@ function formatLabels(labels: Labels): string {
 
 export const prGuardMetrics = new PrGuardMetrics()
 
+export async function startPrGuardMetricsServer(
+  options: { host?: string; port?: number } = {},
+): Promise<http.Server> {
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/metrics') {
+      const payload = prGuardMetrics.renderPrometheus()
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8')
+      res.setHeader('content-length', Buffer.byteLength(payload))
+      res.end(payload)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify({ status: 'ok', service: 'prguard-worker-metrics' }))
+      return
+    }
+    res.statusCode = 404
+    res.end('Not found')
+  })
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('listening', onListening)
+      reject(error)
+    }
+    const onListening = (): void => {
+      server.off('error', onError)
+      resolve()
+    }
+    server.once('error', onError)
+    server.once('listening', onListening)
+    server.listen(options.port ?? 9091, options.host ?? '127.0.0.1')
+  })
+  return server
+}
+
 export function logPrGuardEvent(event: string, fields: Record<string, unknown> = {}): void {
   // One JSON object per line makes the service logs ingestible by Loki, ELK, or a shell pipeline.
   console.log(JSON.stringify({ timestamp: new Date().toISOString(), service: 'prguard', event, ...redactFields(fields) }))
 }
 
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(fields).map(([name, value]) =>
-    /(token|secret|password|authorization|api[-_]?key)/i.test(name)
-      ? [name, '[REDACTED]']
-      : [name, value],
-  ))
+  return redactValue(fields) as Record<string, unknown>
+}
+
+function redactValue(value: unknown, fieldName = ''): unknown {
+  if (/(token|secret|password|authorization|api[-_]?key)/i.test(fieldName)) return '[REDACTED]'
+  if (Array.isArray(value)) return value.map(item => redactValue(item))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([name, nested]) => [name, redactValue(nested, name)]))
+  }
+  return value
 }

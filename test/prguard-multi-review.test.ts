@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   aggregateAgentReviews,
   buildPrReviewSystemPrompt,
+  verifyReviewEvidence,
 } from '../src/prguard/index.js'
 import type { PrDiffSnapshot, ReviewResult } from '../src/prguard/types.js'
 
@@ -86,5 +87,12 @@ describe('PRGuard multi-agent review', () => {
     assert.equal(result.aggregation.supportedFindingCount, 1)
     assert.equal(result.findings[0]?.confidence, 0.9)
     assert.equal(result.findings[0]?.id, 'finding-1')
+  })
+
+  it('rejects findings whose evidence is not grounded in the changed diff', () => {
+    const result = verifyReviewEvidence(snapshot, review('ungrounded', 0.8))
+    assert.equal(result.result.findings.length, 0)
+    assert.equal(result.summary.rejectedFindingCount, 1)
+    assert.deepEqual(result.summary.rejectedFindingIds, ['ungrounded'])
   })
 })

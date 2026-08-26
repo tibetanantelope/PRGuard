@@ -23,6 +23,7 @@ import { reviewResultSchema } from './prguard/index.js'
 import { EvaluationService, RepairService, ReviewService, TraceService } from './prguard/services.js'
 import { startPrGuardServer } from './prguard/http.js'
 import { ReviewJobService, ReviewWorker } from './prguard/jobs.js'
+import { startPrGuardMetricsServer } from './prguard/observability.js'
 import { createInterface } from 'node:readline/promises'
 import process from 'node:process'
 
@@ -46,7 +47,7 @@ minicode pr trace list
 minicode pr trace show <run-id>
 minicode pr trace replay <run-id>
 minicode pr trace resume <run-id> [--multi-agent]
-minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--json]
+minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--compare-baseline] [--gate] [--min-f1 <0..1>] [--min-high-risk-recall <0..1>] [--max-failure-rate <0..1>] [--min-patch-pass-rate <0..1>] [--json]
 GitHub PR reviews can use --github owner/repo#123 or https://github.com/owner/repo/pull/123.
 minicode pr serve [--host <host>] [--port <port>]
 minicode pr worker`)
@@ -324,10 +325,18 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     const stop = (): void => abort.abort()
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
+    const metricsServer = await startPrGuardMetricsServer({ port: runtime.prGuardWorkerMetricsPort })
     try {
       console.log('PRGuard Review Worker started.')
-      await new ReviewWorker(new ReviewJobService(runtime)).run({ signal: abort.signal })
+      const metricsAddress = metricsServer.address()
+      const metricsPort = typeof metricsAddress === 'object' && metricsAddress ? metricsAddress.port : runtime.prGuardWorkerMetricsPort
+      console.log(`PRGuard Worker metrics listening on http://127.0.0.1:${metricsPort}/metrics`)
+      await new ReviewWorker(new ReviewJobService(runtime)).run({
+        signal: abort.signal,
+        reclaimIdleMs: runtime.prGuardRedisReclaimIdleMs,
+      })
     } finally {
+      await new Promise<void>(resolve => metricsServer.close(() => resolve()))
       process.off('SIGINT', stop)
       process.off('SIGTERM', stop)
     }
@@ -337,12 +346,18 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     const evalArgs = [...rest]
     const datasetPath = takeOption(evalArgs, '--dataset') ?? 'evals/tasks.jsonl'
     const predictionsPath = takeOption(evalArgs, '--predictions')
-    const compareBaseline = evalArgs.includes('--compare-baseline')
+    const compareBaseline = evalArgs.includes('--compare-baseline') || evalArgs.includes('--gate')
     if (compareBaseline) evalArgs.splice(evalArgs.indexOf('--compare-baseline'), 1)
     const asJson = evalArgs.includes('--json')
     if (asJson) evalArgs.splice(evalArgs.indexOf('--json'), 1)
     const baseline = evalArgs.includes('--baseline')
     if (baseline) evalArgs.splice(evalArgs.indexOf('--baseline'), 1)
+    const gate = evalArgs.includes('--gate')
+    if (gate) evalArgs.splice(evalArgs.indexOf('--gate'), 1)
+    const minF1 = takeOption(evalArgs, '--min-f1')
+    const minHighRiskRecall = takeOption(evalArgs, '--min-high-risk-recall')
+    const maxFailureRate = takeOption(evalArgs, '--max-failure-rate')
+    const minPatchPassRate = takeOption(evalArgs, '--min-patch-pass-rate')
     if (evalArgs.length > 0) {
       throw new Error(`Unknown arguments: ${evalArgs.join(' ')}`)
     }
@@ -351,6 +366,15 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     }
     if (!baseline && !predictionsPath) {
       throw new Error('Evaluation requires --baseline or --predictions <file>.')
+    }
+    if (gate && !predictionsPath) {
+      throw new Error('--gate requires --predictions <file>.')
+    }
+    const parseThreshold = (value: string | undefined, name: string): number | undefined => {
+      if (value === undefined) return undefined
+      const parsed = Number(value)
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new Error(`${name} must be between 0 and 1.`)
+      return parsed
     }
     const evaluationService = new EvaluationService()
     const report = await evaluationService.evaluate({
@@ -364,9 +388,18 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     if (compareBaseline) {
       const baseline = await evaluationService.evaluate({ datasetPath, source: 'baseline' })
       const comparison = evaluationService.compare(report, baseline)
+      const gateResult = gate
+        ? evaluationService.gate(report, baseline, {
+            minFindingF1: parseThreshold(minF1, '--min-f1'),
+            minHighRiskRecall: parseThreshold(minHighRiskRecall, '--min-high-risk-recall'),
+            maxTaskFailureRate: parseThreshold(maxFailureRate, '--max-failure-rate'),
+            minPatchTestPassRate: parseThreshold(minPatchPassRate, '--min-patch-pass-rate'),
+          })
+        : undefined
       console.log(asJson
-        ? JSON.stringify({ report, baseline, comparison }, null, 2)
-        : `${evaluationService.format(report)}\n\nComparison with rule baseline:\n${JSON.stringify(comparison.delta)}\nRegressions: ${comparison.regressions.length === 0 ? 'none' : comparison.regressions.join(', ')}`)
+        ? JSON.stringify({ report, baseline, comparison, gate: gateResult }, null, 2)
+        : `${evaluationService.format(report)}\n\nComparison with rule baseline:\n${JSON.stringify(comparison.delta)}\nRegressions: ${comparison.regressions.length === 0 ? 'none' : comparison.regressions.join(', ')}${gateResult ? `\nGate: ${gateResult.passed ? 'passed' : `failed - ${gateResult.failures.join('; ')}`}` : ''}`)
+      if (gateResult && !gateResult.passed) process.exitCode = 1
     } else {
       console.log(asJson ? JSON.stringify(report, null, 2) : evaluationService.format(report))
     }

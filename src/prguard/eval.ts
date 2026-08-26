@@ -81,6 +81,19 @@ export type EvalComparison = {
   regressions: string[]
 }
 
+export type EvalGateOptions = {
+  minFindingF1?: number
+  minHighRiskRecall?: number
+  maxTaskFailureRate?: number
+  minPatchTestPassRate?: number
+  failOnBaselineRegression?: boolean
+}
+
+export type EvalGateResult = {
+  passed: boolean
+  failures: string[]
+}
+
 const severityRank: Record<Severity, number> = {
   low: 1,
   medium: 2,
@@ -311,12 +324,56 @@ export async function evaluateDataset(options: {
     expectedByTask.set(task.id, await loadExpectedFindings(path.resolve(datasetDir, task.expected)))
   }
   const predictions = options.predictions ?? await buildBaselinePredictions(options.datasetPath, tasks)
+  const taskIds = new Set(tasks.map(task => task.id))
+  const predictionIds = new Set<string>()
+  for (const prediction of predictions) {
+    if (!taskIds.has(prediction.taskId)) {
+      throw new Error(`Prediction references unknown evaluation task: ${prediction.taskId}`)
+    }
+    if (predictionIds.has(prediction.taskId)) {
+      throw new Error(`Duplicate evaluation prediction for task: ${prediction.taskId}`)
+    }
+    predictionIds.add(prediction.taskId)
+  }
+  const missing = tasks.map(task => task.id).filter(taskId => !predictionIds.has(taskId))
+  if (missing.length > 0) {
+    throw new Error(`Missing evaluation predictions for task(s): ${missing.join(', ')}`)
+  }
   const calculated = calculateEvalMetrics(expectedByTask, predictions)
   return {
     dataset: options.datasetPath,
     source: options.source,
     ...calculated,
   }
+}
+
+export function evaluateGate(
+  candidate: EvalReport,
+  baseline?: EvalReport,
+  options: EvalGateOptions = {},
+): EvalGateResult {
+  const failures: string[] = []
+  const metrics = candidate.metrics
+  const checkMin = (name: string, value: number | null, threshold: number | undefined): void => {
+    if (threshold === undefined || value === null) return
+    if (value < threshold) failures.push(`${name}=${value.toFixed(4)} < minimum ${threshold.toFixed(4)}`)
+  }
+  const checkMax = (name: string, value: number, threshold: number | undefined): void => {
+    if (threshold === undefined) return
+    if (value > threshold) failures.push(`${name}=${value.toFixed(4)} > maximum ${threshold.toFixed(4)}`)
+  }
+  checkMin('findingF1', metrics.findingF1, options.minFindingF1)
+  checkMin('highRiskRecall', metrics.highRiskRecall, options.minHighRiskRecall)
+  checkMin('patchTestPassRate', metrics.patchTestPassRate, options.minPatchTestPassRate)
+  checkMax('taskFailureRate', metrics.taskFailureRate, options.maxTaskFailureRate)
+
+  if (baseline && options.failOnBaselineRegression !== false) {
+    const comparison = compareEvalReports(candidate, baseline)
+    for (const regression of comparison.regressions) {
+      failures.push(`baseline regression: ${regression}`)
+    }
+  }
+  return { passed: failures.length === 0, failures }
 }
 
 export function formatEvalReport(report: EvalReport): string {

@@ -6,15 +6,15 @@ services:
     environment:
       MYSQL_DATABASE: prguard
       MYSQL_USER: prguard
-      MYSQL_PASSWORD: prguard_dev_password
-      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_PASSWORD: ${PRGUARD_MYSQL_PASSWORD:-prguard_dev_password}
+      MYSQL_ROOT_PASSWORD: ${PRGUARD_MYSQL_ROOT_PASSWORD:-123456}
     ports:
       - "3306:3306"
     volumes:
       - prguard_mysql_data:/var/lib/mysql
       - ./infra/mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "prguard", "-pprguard_dev_password"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u prguard -p\"$${MYSQL_PASSWORD}\""]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -27,6 +27,11 @@ services:
       - "6380:6379"
     volumes:
       - prguard_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   prguard_mysql_data:
