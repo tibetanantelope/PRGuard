@@ -11,6 +11,7 @@
     "check": "tsc --noEmit",
     "lint": "eslint src test",
     "test": "node test/run-tests.mjs",
+    "test:redis": "node --import tsx --test test/prguard-redis-integration.test.ts",
     "install-local": "tsx src/install.ts"
   },
   "dependencies": {
