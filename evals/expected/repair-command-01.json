@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/repair-command.ts","lineStart":1,"lineEnd":1,"title":"Command string is assembled from caller-controlled input"}]

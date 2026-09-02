@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/upload.ts","lineStart":1,"lineEnd":1,"title":"User-controlled path may escape its base directory"}]

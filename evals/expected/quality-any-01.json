@@ -1,0 +1,1 @@
+[{"category":"code_quality","severity":"low","file":"src/parser.ts","lineStart":1,"lineEnd":1,"title":"Public function disables type safety with any"}]

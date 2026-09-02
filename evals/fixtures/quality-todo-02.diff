@@ -1,0 +1,5 @@
+diff --git a/src/authorization.ts b/src/authorization.ts
+--- a/src/authorization.ts
++++ b/src/authorization.ts
+@@ -1,1 +1,2 @@
++// TODO: enforce ownership before returning the document

@@ -1,0 +1,5 @@
+diff --git a/src/tenant-report.ts b/src/tenant-report.ts
+--- a/src/tenant-report.ts
++++ b/src/tenant-report.ts
+@@ -1,1 +1,3 @@
++try { return db.query('SELECT * FROM report WHERE tenant = ' + request.tenantId); } catch (error) {}

@@ -1,0 +1,5 @@
+diff --git a/src/internal-fetch.ts b/src/internal-fetch.ts
+--- a/src/internal-fetch.ts
++++ b/src/internal-fetch.ts
+@@ -1,1 +1,2 @@
++return fetch('https://api.example.com/v1/events', { signal: AbortSignal.timeout(5000) });

@@ -1,0 +1,6 @@
+diff --git a/src/files.ts b/src/files.ts
+--- a/src/files.ts
++++ b/src/files.ts
+@@ -1,1 +1,2 @@
++const resolved = path.resolve(uploadRoot, name);
++if (!resolved.startsWith(uploadRoot + path.sep)) throw new Error('outside root');

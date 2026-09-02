@@ -202,6 +202,7 @@ export async function runPrReview(
     role?: string
     skillName?: string
     focus?: string
+    evidenceVerification?: boolean
   } = {},
 ): Promise<ReviewResult> {
   const allTools = await createDefaultToolRegistry({
@@ -309,15 +310,18 @@ export async function runPrReview(
     result = parseModelReviewOutput(retryFinalMessage.content, snapshot)
   }
   result = applyDeterministicRules(result, snapshot)
-  const evidenceVerification = verifyReviewEvidence(snapshot, result)
-  result = evidenceVerification.result
-  await options.trace?.record('checkpoint', {
-    phase: 'evidence_verification',
-    checkedFindingCount: evidenceVerification.summary.checkedFindingCount,
-    acceptedFindingCount: evidenceVerification.summary.acceptedFindingCount,
-    rejectedFindingCount: evidenceVerification.summary.rejectedFindingCount,
-    rejectedFindingIds: evidenceVerification.summary.rejectedFindingIds,
-  })
+  if (options.evidenceVerification !== false) {
+    const evidenceVerification = verifyReviewEvidence(snapshot, result)
+    result = evidenceVerification.result
+    await options.trace?.record('checkpoint', {
+      phase: 'evidence_verification',
+      checkedFindingCount: evidenceVerification.summary.checkedFindingCount,
+      acceptedFindingCount: evidenceVerification.summary.acceptedFindingCount,
+      rejectedFindingCount: evidenceVerification.summary.rejectedFindingCount,
+      rejectedFindingIds: evidenceVerification.summary.rejectedFindingIds,
+      rejectionReasons: evidenceVerification.summary.rejectionReasons,
+    })
+  }
   await options.trace?.record('review_completed', {
     result,
     findingCount: result.findings.length,

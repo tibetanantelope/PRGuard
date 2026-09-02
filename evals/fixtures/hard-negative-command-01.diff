@@ -1,0 +1,5 @@
+diff --git a/src/run.ts b/src/run.ts
+--- a/src/run.ts
++++ b/src/run.ts
+@@ -1,1 +1,1 @@
++execFile(command, args, { shell: false });

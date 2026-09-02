@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/tenant.ts","lineStart":1,"lineEnd":1,"title":"Dynamic SQL is built from request data"}]

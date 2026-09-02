@@ -1,0 +1,5 @@
+diff --git a/src/safe-download.ts b/src/safe-download.ts
+--- a/src/safe-download.ts
++++ b/src/safe-download.ts
+@@ -1,1 +1,2 @@
++if (!candidate.startsWith(root + path.sep)) throw new Error('invalid path');

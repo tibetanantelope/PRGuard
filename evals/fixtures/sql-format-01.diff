@@ -1,0 +1,5 @@
+diff --git a/src/users.ts b/src/users.ts
+--- a/src/users.ts
++++ b/src/users.ts
+@@ -1,1 +1,2 @@
++return db.query(`SELECT * FROM users WHERE name = '${request.query.name}'`);

@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/import.ts","lineStart":1,"lineEnd":1,"title":"Request input reaches command execution"},{"category":"reliability","severity":"medium","file":"src/import.ts","lineStart":1,"lineEnd":1,"title":"Exception is swallowed without handling"}]

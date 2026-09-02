@@ -1,0 +1,5 @@
+diff --git a/src/auth.ts b/src/auth.ts
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,1 +1,2 @@
++console.log('login request', request.body);

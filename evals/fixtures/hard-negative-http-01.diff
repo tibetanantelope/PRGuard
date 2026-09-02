@@ -1,0 +1,5 @@
+diff --git a/src/webhook.ts b/src/webhook.ts
+--- a/src/webhook.ts
++++ b/src/webhook.ts
+@@ -1,1 +1,1 @@
++const destination = ALLOWED_ENDPOINTS[request.target];

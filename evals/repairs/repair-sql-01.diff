@@ -1,0 +1,6 @@
+diff --git a/src/repair-sql.ts b/src/repair-sql.ts
+--- a/src/repair-sql.ts
++++ b/src/repair-sql.ts
+@@ -1,1 +1,2 @@
+-export function find(name: string) { return db.query(`SELECT * FROM users WHERE name = '${name}'`); }
++export function find(name: string) { return db.query('SELECT * FROM users WHERE name = ?', [name]); }

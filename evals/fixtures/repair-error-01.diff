@@ -1,0 +1,5 @@
+diff --git a/src/repair-error.ts b/src/repair-error.ts
+--- a/src/repair-error.ts
++++ b/src/repair-error.ts
+@@ -1,1 +1,2 @@
++try { await save(record); } catch (error) {}

@@ -1,0 +1,5 @@
+diff --git a/src/notify.ts b/src/notify.ts
+--- a/src/notify.ts
++++ b/src/notify.ts
+@@ -1,1 +1,2 @@
++sendNotification(user).then(saveAuditRecord);

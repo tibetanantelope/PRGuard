@@ -1,0 +1,1 @@
+[{"category":"reliability","severity":"medium","file":"src/profile.ts","lineStart":1,"lineEnd":1,"title":"Optional nested value is dereferenced without a guard"}]

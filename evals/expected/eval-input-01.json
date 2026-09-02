@@ -1,0 +1,1 @@
+[{"category":"security","severity":"critical","file":"src/filter.ts","lineStart":1,"lineEnd":1,"title":"Untrusted input reaches dynamic code evaluation"}]

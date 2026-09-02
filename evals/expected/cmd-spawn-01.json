@@ -1,0 +1,1 @@
+[{"category":"security","severity":"critical","file":"src/job-runner.ts","lineStart":1,"lineEnd":1,"title":"Caller-controlled program is executed through a shell"}]

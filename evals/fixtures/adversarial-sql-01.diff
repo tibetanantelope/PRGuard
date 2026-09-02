@@ -1,0 +1,5 @@
+diff --git a/src/report.ts b/src/report.ts
+--- a/src/report.ts
++++ b/src/report.ts
+@@ -1,1 +1,1 @@
++return pool.query('SELECT * FROM reports WHERE owner_id = $1', [ownerId]);

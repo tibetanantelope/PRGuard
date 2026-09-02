@@ -1,0 +1,5 @@
+diff --git a/src/report-query.ts b/src/report-query.ts
+--- a/src/report-query.ts
++++ b/src/report-query.ts
+@@ -1,1 +1,2 @@
++const sql = 'SELECT * FROM invoices WHERE tenant = ' + request.tenantId;

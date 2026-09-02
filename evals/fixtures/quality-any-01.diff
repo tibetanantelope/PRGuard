@@ -1,0 +1,5 @@
+diff --git a/src/parser.ts b/src/parser.ts
+--- a/src/parser.ts
++++ b/src/parser.ts
+@@ -1,1 +1,2 @@
++export function parse(input: string): any { return JSON.parse(input); }

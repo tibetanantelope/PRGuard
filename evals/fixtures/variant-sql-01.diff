@@ -1,0 +1,5 @@
+diff --git a/src/tenant.ts b/src/tenant.ts
+--- a/src/tenant.ts
++++ b/src/tenant.ts
+@@ -1,1 +1,1 @@
++const sql = `SELECT * FROM invoices WHERE tenant_id = '${tenantId}'`;

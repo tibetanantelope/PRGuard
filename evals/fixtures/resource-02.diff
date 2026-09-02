@@ -1,0 +1,5 @@
+diff --git a/src/proxy.ts b/src/proxy.ts
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -1,1 +1,2 @@
++const response = await fetch(url); return response.body;

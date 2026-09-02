@@ -1,0 +1,5 @@
+diff --git a/src/passwords.ts b/src/passwords.ts
+--- a/src/passwords.ts
++++ b/src/passwords.ts
+@@ -1,1 +1,2 @@
++const digest = crypto.createHash('md5').update(password).digest('hex');

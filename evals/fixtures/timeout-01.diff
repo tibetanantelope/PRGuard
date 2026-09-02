@@ -1,0 +1,5 @@
+diff --git a/src/sync.ts b/src/sync.ts
+--- a/src/sync.ts
++++ b/src/sync.ts
+@@ -1,1 +1,2 @@
++await axios.post(syncUrl, payload);

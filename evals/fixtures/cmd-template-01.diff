@@ -1,0 +1,5 @@
+diff --git a/src/commands.ts b/src/commands.ts
+--- a/src/commands.ts
++++ b/src/commands.ts
+@@ -1,1 +1,2 @@
++const command = `git show ${request.query.ref}`;

@@ -1,0 +1,5 @@
+diff --git a/src/profile.ts b/src/profile.ts
+--- a/src/profile.ts
++++ b/src/profile.ts
+@@ -1,1 +1,2 @@
++return user.profile.displayName.trim();

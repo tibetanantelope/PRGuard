@@ -21,6 +21,7 @@ import {
 } from './prguard/index.js'
 import { reviewResultSchema } from './prguard/index.js'
 import { EvaluationService, RepairService, ReviewService, TraceService } from './prguard/services.js'
+import { evalExperimentModes, formatExperimentSummary, runPrGuardEvaluation, type EvalExperimentMode } from './prguard/eval-experiments.js'
 import { startPrGuardServer } from './prguard/http.js'
 import { ReviewJobService, ReviewWorker } from './prguard/jobs.js'
 import { startPrGuardMetricsServer } from './prguard/observability.js'
@@ -48,6 +49,7 @@ minicode pr trace show <run-id>
 minicode pr trace replay <run-id>
 minicode pr trace resume <run-id> [--multi-agent]
 minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--compare-baseline] [--gate] [--min-f1 <0..1>] [--min-high-risk-recall <0..1>] [--max-failure-rate <0..1>] [--min-patch-pass-rate <0..1>] [--json]
+minicode pr eval-run --mode <rule-baseline|single-agent|multi-agent|multi-agent-verifier|adaptive> [--dataset <tasks.jsonl>] [--output <dir>] [--split <validation|holdout>] [--model <name>] [--prompt-version <version>] [--json]
 GitHub PR reviews can use --github owner/repo#123 or https://github.com/owner/repo/pull/123.
 minicode pr serve [--host <host>] [--port <port>]
 minicode pr worker`)
@@ -403,6 +405,39 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     } else {
       console.log(asJson ? JSON.stringify(report, null, 2) : evaluationService.format(report))
     }
+    return true
+  }
+  if (subcommand === 'eval-run') {
+    const evalArgs = [...rest]
+    const modeText = takeOption(evalArgs, '--mode')
+    if (!modeText || !evalExperimentModes.includes(modeText as EvalExperimentMode)) {
+      throw new Error(`--mode must be one of: ${evalExperimentModes.join(', ')}`)
+    }
+    const datasetPath = takeOption(evalArgs, '--dataset') ?? 'evals/tasks.jsonl'
+    const splitText = takeOption(evalArgs, '--split')
+    if (splitText !== undefined && splitText !== 'validation' && splitText !== 'holdout') {
+      throw new Error('--split must be validation or holdout.')
+    }
+    const outputDir = takeOption(evalArgs, '--output') ?? `evals/reports/${modeText}-${Date.now()}`
+    const model = takeOption(evalArgs, '--model')
+    const promptVersion = takeOption(evalArgs, '--prompt-version')
+    const runId = takeOption(evalArgs, '--run-id')
+    const asJson = evalArgs.includes('--json')
+    if (asJson) evalArgs.splice(evalArgs.indexOf('--json'), 1)
+    if (evalArgs.length > 0) throw new Error(`Unknown arguments: ${evalArgs.join(' ')}`)
+    const runtime = modeText === 'rule-baseline' ? undefined : await loadRuntimeConfig()
+    const result = await runPrGuardEvaluation({
+      datasetPath,
+      outputDir,
+      mode: modeText as EvalExperimentMode,
+      runtime,
+      cwd,
+      model,
+      promptVersion,
+      split: splitText as 'validation' | 'holdout' | undefined,
+      runId,
+    })
+    console.log(asJson ? JSON.stringify(result, null, 2) : formatExperimentSummary(result))
     return true
   }
 

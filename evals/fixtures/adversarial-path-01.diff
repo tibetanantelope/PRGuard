@@ -1,0 +1,7 @@
+diff --git a/src/download.ts b/src/download.ts
+--- a/src/download.ts
++++ b/src/download.ts
+@@ -1,2 +1,3 @@
++const candidate = path.resolve(root, req.query.file);
++if (!candidate.startsWith(root + path.sep)) return res.status(400).end();
++return sendFile(candidate);

@@ -1,221 +1,126 @@
-# MiniCode
+# PRGuard
 
-<p align="center">
-  <img src="./docs/logo.svg" alt="MiniCode Logo" width="180" />
-</p>
+面向研发流程的 PR 风险治理与安全修复 Agent。
 
-<h2 align="center">MiniCode</h2>
+PRGuard 将 Pull Request 审查从一次性的 LLM 调用，扩展为可恢复、可观测、可验证、可回滚的工程闭环：
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Editor-Minicode-D97757?style=for-the-badge" alt="Editor: Minicode" />
-  <img src="https://img.shields.io/badge/%23minicode-Project-B85C3F?style=for-the-badge" alt="#minicode" />
-  <img src="https://img.shields.io/badge/%23lightweight-Focus-F0EBE1?style=for-the-badge&labelColor=8B8B8B" alt="#lightweight" />
-  <a href="https://deepwiki.com/LiuMengxuan04/MiniCode">
-    <img src="https://img.shields.io/badge/Ask-DeepWiki-0F7BBF?style=for-the-badge&labelColor=2B2B2B" alt="Ask DeepWiki" />
-  </a>
-</p>
+```text
+GitHub PR -> Webhook HMAC 校验与 Delivery 幂等 -> Review Job
+-> Redis Streams Consumer Group -> Worker
+-> Security / Reliability / Code Quality Agents
+-> Finding 聚合与 Evidence Verifier -> 人工确认
+-> Patch Agent -> 临时 Git Worktree 隔离测试
+-> 成功应用或失败回滚 -> GitHub Check Run / PR Comment
+```
 
----
+## 项目亮点
 
-<p align="center">
-  A lightweight, highly efficient coding tool. Designed for speed, built for simplicity.
-</p>
+- 多 Agent PR 风险审查：Security、Reliability、Code Quality 专家并行分析。
+- 证据驱动的 Finding：风险结论关联变更文件、代码位置和可验证证据。
+- Adaptive 路由：低风险 Diff 走 Single-Agent，复杂或高风险 Diff 升级到 Multi-Agent。
+- Evidence Verifier：对未充分支持或低置信度 Finding 做选择性证据复核。
+- Redis Streams 可靠任务系统：Consumer Group、ACK、Heartbeat、XAUTOCLAIM、重试、死信和 Worker 崩溃恢复。
+- 安全修复闭环：人工审批、补丁生成、临时 Worktree 测试、失败自动回滚。
+- GitHub 集成：Webhook 自动触发、PR Diff 拉取、Check Run 和结构化评论。
+- 可观测性：Run Trace、API/Worker 独立 Prometheus `/metrics`、模型 Token、工具调用、耗时和失败原因。
+- 持久化：MySQL 保存 Review Job、Finding、Patch 和 Trace；未配置时支持本地文件降级。
 
-[简体中文](./README.zh-CN.md) | [Usage Guide](./USAGE.md) | [DeepWiki](https://deepwiki.com/LiuMengxuan04/MiniCode) | [Architecture](./ARCHITECTURE.md) | [Contributing](./CONTRIBUTING.md) | [Roadmap](./ROADMAP.md) | [License](./LICENSE)
+## 评测结果
 
-MiniCode is a lightweight terminal coding assistant for local development workflows.
+项目包含 57 条人工标注 PR Diff，划分为 37 条 validation 和 20 条 holdout，覆盖 Security、Reliability、Code Quality、多风险样本、安全负样本和 5 个修复任务。
 
-It provides Claude Code-like workflow and architectural ideas in a much smaller implementation, making it especially useful for learning, experimentation, and custom tooling.
+最终 Holdout 对照实验（模型：`gpt-5.5`，Prompt：`prguard-review-v1`）：
 
-## Overview
+| 模式 | Finding F1 | 高风险召回率 | 任务失败率 |
+|---|---:|---:|---:|
+| Rule Baseline | 57.1% | 57.1% | 0.0% |
+| Single-Agent | 71.4% | 100.0% | 0.0% |
+| Multi-Agent | **76.5%** | **100.0%** | 0.0% |
+| Multi-Agent + Verifier | 68.6% | 85.7% | 0.0% |
+| Adaptive | 66.7% | 100.0% | 0.0% |
 
-MiniCode is built around a practical terminal-first agent loop:
+Multi-Agent 在 Holdout 上相比 Single-Agent 提升 5.1 个百分点，相比规则基线提升 19.4 个百分点。当前默认模式为 Multi-Agent；Single-Agent 适合低成本场景，Adaptive 和 Verifier 作为成本优化与证据复核策略保留。
 
-- accept a user request
-- inspect the workspace
-- call tools when needed
-- review file changes before writing
-- return a final response in the same terminal session
+> 评测结果保存在 `evals/reports/`，每次运行同时生成 `manifest.json`、`predictions.jsonl`、`report.json` 和独立 Run Trace。
 
-The project is intentionally compact, so the control flow, tool model, and TUI behavior remain easy to understand and extend.
+## 技术栈
 
-## Core Authors
+TypeScript / Node.js / Redis Streams / MySQL / GitHub API / Prometheus / Docker Compose
 
-<table>
-  <tr>
-    <td align="center" valign="top" width="20%">
-      <a href="https://github.com/LiuMengxuan04">
-        <img src="https://github.com/LiuMengxuan04.png?size=160" width="96" height="96" alt="LiuMengxuan04" /><br />
-        <strong>Liu Mengxuan</strong>
-      </a>
-      <br />
-      <sub><strong>Founder</strong></sub>
-      <br />
-      <sub>Leads the TypeScript repo, core workflow, MCP/Skills, TUI, and docs.</sub>
-    </td>
-    <td align="center" valign="top" width="20%">
-      <a href="https://github.com/GateJustice">
-        <img src="https://github.com/GateJustice.png?size=160" width="96" height="96" alt="GateJustice" /><br />
-        <strong>GateJustice</strong>
-      </a>
-      <br />
-      <sub><strong>Co-initiator</strong></sub>
-      <br />
-      <sub>Contributes the long-session context system, including usage accounting, auto compact, and context collapse.</sub>
-    </td>
-    <td align="center" valign="top" width="20%">
-      <a href="https://github.com/harkerhand">
-        <img src="https://github.com/harkerhand.png?size=160" width="96" height="96" alt="harkerhand" /><br />
-        <strong>harkerhand</strong>
-      </a>
-      <br />
-      <sub><strong>MiniCode-rs</strong></sub>
-      <br />
-      <sub>Main author of the Rust version.</sub>
-    </td>
-    <td align="center" valign="top" width="20%">
-      <a href="https://github.com/QUSETIONS">
-        <img src="https://github.com/QUSETIONS.png?size=160" width="96" height="96" alt="QUSETIONS" /><br />
-        <strong>QUSETIONS</strong>
-      </a>
-      <br />
-      <sub><strong>MiniCode-Python</strong></sub>
-      <br />
-      <sub>Main author of the Python version.</sub>
-    </td>
-    <td align="center" valign="top" width="20%">
-      <a href="https://github.com/GoDiao">
-        <img src="https://github.com/GoDiao.png?size=160" width="96" height="96" alt="GoDiao" /><br />
-        <strong>GoDiao</strong>
-      </a>
-      <br />
-      <sub><strong>Core contributor</strong></sub>
-      <br />
-      <sub>Contributes layered memory, /init, session resume, and TUI interaction improvements.</sub>
-    </td>
-  </tr>
-</table>
+## 快速开始
 
-Summaries are based on the main repository and multi-language branch commit history. For the broader contributor list, please refer to the repository commit history.
+### 1. 安装依赖
 
-## Multi-language Versions
-
-- TypeScript (this repo): [MiniCode](https://github.com/LiuMengxuan04/MiniCode)
-- Rust version: [MiniCode-rs](https://github.com/harkerhand/MiniCode-rs/tree/master)
-- Python version: [MiniCode-Python](https://github.com/QUSETIONS/MiniCode-Python)
-- Go version: [MiniCode-go](https://github.com/ssbsunshengbo/MiniCode)
-- Java version: [MiniCode4j](https://github.com/hobbescalvin414-tech/minicode4j/tree/feat/default-ts-ui)
-
-## Product Showcase Page
-
-- Open [docs/index.html](./docs/index.html) in a browser for a visual product overview.
-- GitHub Pages (recommended): `https://liumengxuan04.github.io/MiniCode/`
-
-## Why MiniCode
-
-MiniCode is a good fit if you want:
-
-- a lightweight coding assistant instead of a large platform
-- a terminal UI with tool calling, transcript, and command workflow
-- a small codebase that is suitable for study and modification
-- a reference implementation for Claude Code-like agent architecture
-
-## Core Capabilities
-
-- Multi-step tool execution in a single turn, forming a `model -> tool -> model` loop.
-- Up to 3 concurrent read-only sub-agents; the root agent owns all code changes and can wait for or close workers.
-- Full-screen terminal UI with input history, transcript scrolling, slash command menu, and approval flows.
-- Per-project session persistence with resume, rename, fork, and compact commands.
-- Provider-usage-first context stats with tail estimates, auto-compact, context collapse, and snip compact.
-- Built-in tools for files, search, editing, command execution, web fetch/search, and clarification prompts.
-- Local skills discovered through `SKILL.md`, plus MCP tools/resources/prompts over stdio or remote HTTP.
-- Review-before-write file edits with path and command permission checks.
-- Oversized tool results are stored on disk and replaced in context with a short preview and file path.
-
-Full command references, configuration examples, session details, and Skills/MCP usage have moved to the [Usage Guide](./USAGE.md).
-
-## Installation
-
-```bash
-cd mini-code
+```powershell
 npm install
-npm run install-local
 ```
 
-The installer asks for the model name, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_AUTH_TOKEN`. Configuration is stored in:
+### 2. 启动 MySQL 和 Redis
 
-- `~/.mini-code/settings.json`
-- `~/.mini-code/mcp.json`
-
-You can override the config directory with `MINI_CODE_HOME` and the launcher directory with `MINI_CODE_BIN_DIR`. See [Installation Details](./USAGE.md#installation-details) for more.
-
-## Quick Start
-
-Run the installed launcher:
-
-```bash
-minicode
+```powershell
+docker compose up -d
 ```
 
-Run in development mode:
+### 3. 配置模型
 
-```bash
-npm run dev
+复制 `.env.example` 为 `.env`，配置 `ANTHROPIC_MODEL`、`ANTHROPIC_BASE_URL` 以及 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。不要将 `.env` 提交到 Git。
+
+### 4. 运行本地审查
+
+```powershell
+npm.cmd run dev -- pr review --base HEAD~1 --multi-agent --json
 ```
 
-Run in offline demo mode:
+### 5. 启动 API 与 Worker
 
-```bash
-MINI_CODE_MODEL_MODE=mock npm run dev
+```powershell
+npm.cmd run dev -- pr serve --port 8787
+npm.cmd run dev -- pr worker
 ```
 
-## Common Entry Points
+API 默认监听 `http://127.0.0.1:8787`，Worker 的 Prometheus 指标默认监听 `http://127.0.0.1:9091/metrics`。
 
-- `/help`: show interactive help.
-- `/tools`: list available tools.
-- `/skills`: list discovered skills.
-- `/mcp`: show MCP connection status.
-- `/status`: show session and context status.
-- `/init`: scaffold `.mini-code/` and `MINI.md` for the current project.
-- `/memory`: inspect the layered memory files loaded for the current turn.
-- `/model` / `/model <name>`: inspect or switch the model.
-- `/resume`: open the session picker.
-- `/compact`: manually compact the context.
+## 评测命令
 
-Management commands include `minicode mcp ...` and `minicode skills ...`. See [Commands](./USAGE.md#commands) for the full reference.
+规则基线不需要模型 API；Agent 模式会读取 `.env` 中的模型配置。
 
-## Documentation
-
-- [Usage Guide](./USAGE.md)
-- [Architecture Overview](./ARCHITECTURE.md)
-- [中文架构说明](./ARCHITECTURE_ZH.md)
-- [Contribution Guidelines](./CONTRIBUTING.md)
-- [中文贡献规范](./CONTRIBUTING_ZH.md)
-- [Roadmap](./ROADMAP.md)
-- [路线图](./ROADMAP_ZH.md)
-- [Learn Claude Code Design Through MiniCode](./CLAUDE_CODE_PATTERNS.md)
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=LiuMengxuan04%2FMiniCode&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=LiuMengxuan04/MiniCode&type=date&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=LiuMengxuan04/MiniCode&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=LiuMengxuan04/MiniCode&type=date&legend=bottom-right" />
- </picture>
-</a>
-
-## Development
-
-```bash
-npm run check
-npm test
+```powershell
+npm.cmd run dev -- pr eval-run --mode rule-baseline --split holdout --output evals/reports/rule-holdout
+npm.cmd run dev -- pr eval-run --mode single-agent --split holdout --output evals/reports/single-holdout
+npm.cmd run dev -- pr eval-run --mode multi-agent --split holdout --output evals/reports/multi-holdout
+npm.cmd run dev -- pr eval-run --mode multi-agent-verifier --split holdout --output evals/reports/verifier-holdout
+npm.cmd run dev -- pr eval-run --mode adaptive --split holdout --output evals/reports/adaptive-holdout
 ```
 
-## PRGuard Project
+## Demo
 
-This repository also contains PRGuard, a production-oriented PR risk governance and security repair Agent built on top of the MiniCode runtime. See the [PRGuard project README](./PRGUARD_README.md), [architecture](./docs/PRGUARD_ARCHITECTURE.md), [demo runbook](./docs/PRGUARD_DEMO_RUNBOOK.md), and [resume description](./docs/PRGUARD_RESUME.md).
+建议按照 [PRGuard Demo Runbook](./docs/PRGUARD_DEMO_RUNBOOK.md) 演示完整的“审查—人工确认—修复—测试—回滚”流程。
 
- ## PRGuard local review demo
+## 文档
 
-MiniCode is intentionally small and pragmatic. The goal is to keep the architecture understandable, hackable, and easy to extend.
+- [系统架构](./docs/PRGUARD_ARCHITECTURE.md)
+- [本地 Demo Runbook](./docs/PRGUARD_DEMO_RUNBOOK.md)
+- [HTTP API](./docs/PRGUARD_API.md)
+- [GitHub Webhook 集成](./docs/PRGUARD_GITHUB.md)
+- [Redis Streams 与 Worker](./docs/PRGUARD_JOBS.md)
+- [Multi-Agent 设计](./docs/PRGUARD_MULTI_AGENT.md)
+- [评测方法与指标](./docs/PRGUARD_EVAL.md)
+- [评测失败分析](./docs/PRGUARD_V1_FAILURE_ANALYSIS.md)
+- [可观测性](./docs/PRGUARD_OBSERVABILITY.md)
+- [安全边界](./docs/PRGUARD_SECURITY.md)
+- [修复可靠性](./docs/PRGUARD_RELIABILITY.md)
+- [数据持久化](./docs/PRGUARD_STORAGE.md)
+- [简历项目描述](./docs/PRGUARD_RESUME.md)
+
+## 测试
+
+```powershell
+npm.cmd run check
+npm.cmd test
+```
+
+当前自动化测试结果：296 passed，0 failed，1 skipped（Redis 集成测试需要显式开启）。
+
+## License
+
+MIT

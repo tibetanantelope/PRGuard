@@ -1,0 +1,5 @@
+diff --git a/src/job-runner.ts b/src/job-runner.ts
+--- a/src/job-runner.ts
++++ b/src/job-runner.ts
+@@ -1,1 +1,2 @@
++spawn(request.body.program, request.body.args, { shell: true });

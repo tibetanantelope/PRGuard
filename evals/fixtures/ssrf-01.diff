@@ -1,0 +1,5 @@
+diff --git a/src/fetch-preview.ts b/src/fetch-preview.ts
+--- a/src/fetch-preview.ts
++++ b/src/fetch-preview.ts
+@@ -1,1 +1,2 @@
++return fetch(request.body.url);

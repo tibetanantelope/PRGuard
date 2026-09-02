@@ -1,0 +1,1 @@
+[{"category":"code_quality","severity":"medium","file":"src/auth.ts","lineStart":1,"lineEnd":1,"title":"Debug logging may expose sensitive request data"}]

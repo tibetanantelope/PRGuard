@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/passwords.ts","lineStart":1,"lineEnd":1,"title":"Weak MD5 hash is used for password storage"}]

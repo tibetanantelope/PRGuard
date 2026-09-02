@@ -1,0 +1,5 @@
+diff --git a/src/validate.ts b/src/validate.ts
+--- a/src/validate.ts
++++ b/src/validate.ts
+@@ -1,1 +1,2 @@
++if (!email) throw new Error('email'); if (!email) throw new Error('email');

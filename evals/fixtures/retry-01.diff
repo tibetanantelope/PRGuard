@@ -1,0 +1,5 @@
+diff --git a/src/client.ts b/src/client.ts
+--- a/src/client.ts
++++ b/src/client.ts
+@@ -1,1 +1,2 @@
++return await fetch('https://billing.internal/charge', { method: 'POST' });

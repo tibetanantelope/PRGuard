@@ -1,0 +1,5 @@
+diff --git a/src/archive.ts b/src/archive.ts
+--- a/src/archive.ts
++++ b/src/archive.ts
+@@ -1,1 +1,1 @@
++spawn(`tar -xf ${req.body.archive}`, { shell: true });

@@ -1,0 +1,1 @@
+[{"category":"reliability","severity":"medium","file":"src/client.ts","lineStart":1,"lineEnd":1,"title":"Transient external operation has no retry or failure policy"}]

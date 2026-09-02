@@ -1,0 +1,6 @@
+diff --git a/src/sync.ts b/src/sync.ts
+--- a/src/sync.ts
++++ b/src/sync.ts
+@@ -1,2 +1,2 @@
++for (let attempt = 0; attempt < 3; attempt++) {
++  await fetch(syncUrl);

@@ -1,0 +1,5 @@
+diff --git a/src/safe-run.ts b/src/safe-run.ts
+--- a/src/safe-run.ts
++++ b/src/safe-run.ts
+@@ -1,1 +1,2 @@
++return execFile('git', ['show', ref], { shell: false });

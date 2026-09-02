@@ -1,0 +1,5 @@
+diff --git a/src/repair-command.ts b/src/repair-command.ts
+--- a/src/repair-command.ts
++++ b/src/repair-command.ts
+@@ -1,1 +1,2 @@
++export function run(command: string, args: string[]) { return exec(command + ' ' + args.join(' ')); }

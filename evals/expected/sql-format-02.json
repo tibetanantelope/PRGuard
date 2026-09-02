@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/report-query.ts","lineStart":1,"lineEnd":1,"title":"Tenant input is concatenated into SQL"}]

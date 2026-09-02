@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/commands.ts","lineStart":1,"lineEnd":1,"title":"Untrusted input is interpolated into a shell command"}]

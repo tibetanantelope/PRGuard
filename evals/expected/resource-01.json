@@ -1,0 +1,1 @@
+[{"category":"reliability","severity":"medium","file":"src/report.ts","lineStart":1,"lineEnd":1,"title":"Database connection is not released"}]

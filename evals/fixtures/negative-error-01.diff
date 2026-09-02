@@ -1,0 +1,5 @@
+diff --git a/src/safe-handler.ts b/src/safe-handler.ts
+--- a/src/safe-handler.ts
++++ b/src/safe-handler.ts
+@@ -1,1 +1,2 @@
++catch (error) { logger.error(error); throw error; }

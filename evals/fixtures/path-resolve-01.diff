@@ -1,0 +1,5 @@
+diff --git a/src/download.ts b/src/download.ts
+--- a/src/download.ts
++++ b/src/download.ts
+@@ -1,1 +1,2 @@
++return fs.readFile(path.resolve('/srv/files', request.query.name));

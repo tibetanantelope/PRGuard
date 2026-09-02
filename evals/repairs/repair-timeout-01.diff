@@ -1,0 +1,6 @@
+diff --git a/src/repair-timeout.ts b/src/repair-timeout.ts
+--- a/src/repair-timeout.ts
++++ b/src/repair-timeout.ts
+@@ -1,1 +1,2 @@
+-export async function sync(url: string) { return fetch(url); }
++export async function sync(url: string) { return fetch(url, { signal: AbortSignal.timeout(5000) }); }

@@ -1,0 +1,1 @@
+[{"category":"reliability","severity":"medium","file":"src/worker.ts","lineStart":3,"lineEnd":3,"title":"Exception is swallowed without handling"}]

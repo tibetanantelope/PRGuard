@@ -1,0 +1,5 @@
+diff --git a/src/upload.ts b/src/upload.ts
+--- a/src/upload.ts
++++ b/src/upload.ts
+@@ -1,1 +1,1 @@
++return fs.readFile(path.join(uploadRoot, req.query.name));

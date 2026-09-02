@@ -1,0 +1,6 @@
+diff --git a/src/repair-path.ts b/src/repair-path.ts
+--- a/src/repair-path.ts
++++ b/src/repair-path.ts
+@@ -1,1 +1,2 @@
+-export function open(name: string) { return fs.readFile(path.join('/srv/data', name)); }
++export function open(name: string) { const target = path.resolve('/srv/data', name); if (!target.startsWith('/srv/data' + path.sep)) throw new Error('invalid path'); return fs.readFile(target); }

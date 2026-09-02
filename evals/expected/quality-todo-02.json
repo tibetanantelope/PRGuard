@@ -1,0 +1,1 @@
+[{"category":"code_quality","severity":"medium","file":"src/authorization.ts","lineStart":1,"lineEnd":1,"title":"Authorization change leaves a security-sensitive TODO"}]

@@ -173,11 +173,17 @@ export const reviewResultSchema = z.object({
   input: reviewInputSchema,
   findings: z.array(findingSchema),
   summary: reviewSummarySchema,
+  routing: z.object({
+    strategy: z.literal('adaptive'),
+    escalated: z.boolean(),
+    reasons: z.array(z.string().min(1)),
+  }).optional(),
   evidenceVerification: z.object({
     checkedFindingCount: z.number().int().nonnegative(),
     acceptedFindingCount: z.number().int().nonnegative(),
     rejectedFindingCount: z.number().int().nonnegative(),
     rejectedFindingIds: z.array(z.string().min(1)),
+    rejectionReasons: z.object({}).catchall(z.string()).default({}),
   }).optional(),
   patch: patchSchema.optional(),
 })

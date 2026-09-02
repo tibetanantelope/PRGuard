@@ -1,0 +1,5 @@
+diff --git a/src/cache-refresh.ts b/src/cache-refresh.ts
+--- a/src/cache-refresh.ts
++++ b/src/cache-refresh.ts
+@@ -1,1 +1,2 @@
++void refreshCache();

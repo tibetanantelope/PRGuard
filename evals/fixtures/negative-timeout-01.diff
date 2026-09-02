@@ -1,0 +1,5 @@
+diff --git a/src/health-check.ts b/src/health-check.ts
+--- a/src/health-check.ts
++++ b/src/health-check.ts
+@@ -1,1 +1,2 @@
++return axios.get(url, { timeout: 3000 });

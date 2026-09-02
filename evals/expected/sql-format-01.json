@@ -1,0 +1,1 @@
+[{"category":"security","severity":"high","file":"src/users.ts","lineStart":1,"lineEnd":1,"title":"Request input is interpolated into SQL"}]

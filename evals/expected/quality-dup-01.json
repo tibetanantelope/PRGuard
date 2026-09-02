@@ -1,0 +1,1 @@
+[{"category":"code_quality","severity":"low","file":"src/validate.ts","lineStart":1,"lineEnd":1,"title":"Validation logic is duplicated in the same change"}]

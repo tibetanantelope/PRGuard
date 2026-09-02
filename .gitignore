@@ -11,3 +11,6 @@ dist/
 # MiniCode local artifacts
 .mini-code/settings.local.json
 .mini-code/sessions/
+
+# Generated PRGuard evaluation reports and Run Traces
+evals/reports/
