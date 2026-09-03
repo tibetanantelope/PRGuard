@@ -203,6 +203,7 @@ export async function runPrReview(
     role?: string
     skillName?: string
     focus?: string
+    capabilities?: readonly string[]
     evidenceVerification?: boolean
     longTermMemory?: LongTermMemoryItem[]
   } = {},
@@ -253,6 +254,7 @@ export async function runPrReview(
           role: options.role,
           skillName: options.skillName,
           focus: options.focus,
+          capabilities: options.capabilities,
         }),
       },
       { role: 'user', content: buildPrReviewUserPrompt(snapshot) },

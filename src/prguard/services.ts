@@ -2,6 +2,7 @@ import type { RuntimeConfig } from '../config.js'
 import {
   applyAndVerifyPatch,
   generatePatch,
+  repairWithVerificationRetries,
   type PatchApplicationResult,
 } from './repair.js'
 import {
@@ -118,6 +119,37 @@ export class RepairService {
     trace?: PrGuardTrace,
   ): Promise<PatchApplicationResult> {
     return this.applyAndRemember(cwd, patch, testCommand, trace)
+  }
+
+  /** Generate, verify, and retry a repair using bounded verification feedback. */
+  async repair(
+    snapshot: PrDiffSnapshot,
+    review: ReviewResult,
+    findingIds: string[],
+    testCommand: string,
+    options: { maxAttempts?: number; trace?: PrGuardTrace } = {},
+  ) {
+    return repairWithVerificationRetries(
+      async ({ attempt, previous }) => {
+        const patch = await generatePatch(snapshot, review, findingIds, this.runtime, {
+          trace: options.trace,
+          verificationFeedback: previous?.verificationOutput,
+        })
+        await this.persistence.savePatch(review.reviewId, {
+          ...patch,
+          summary: redactSensitiveText(patch.summary),
+          unifiedDiff: redactSensitiveText(patch.unifiedDiff),
+        })
+        await options.trace?.record('checkpoint', {
+          phase: 'repair_candidate_generated',
+          attempt,
+          hasPreviousVerificationFeedback: Boolean(previous),
+        })
+        return patch
+      },
+      patch => this.applyAndRemember(snapshot.input.cwd, patch, testCommand, options.trace),
+      { maxAttempts: options.maxAttempts },
+    )
   }
 
   async recordFindingDecisions(

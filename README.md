@@ -121,6 +121,7 @@ npm.cmd run dev -- pr eval-run --mode adaptive --split holdout --output evals/re
 - [Redis Streams 与 Worker](./docs/PRGUARD_JOBS.md)
 - [Multi-Agent 设计](./docs/PRGUARD_MULTI_AGENT.md)
 - [评测方法与指标](./docs/PRGUARD_EVAL.md)
+- [GitHub Actions CI 问题复习笔记](./docs/过程中遇到的问题及解决方式.md)
 - [评测失败分析](./docs/PRGUARD_V1_FAILURE_ANALYSIS.md)
 - [可观测性](./docs/PRGUARD_OBSERVABILITY.md)
 - [安全边界](./docs/PRGUARD_SECURITY.md)

@@ -5,6 +5,7 @@ export type SpecialistRole = {
   skillName: string
   category: RiskCategory
   focus: string
+  capabilities: readonly string[]
 }
 
 export const prGuardAgentRoles: readonly SpecialistRole[] = [
@@ -13,18 +14,21 @@ export const prGuardAgentRoles: readonly SpecialistRole[] = [
     skillName: 'prguard-security',
     category: 'security',
     focus: 'injection, authorization, path traversal, secrets, unsafe deserialization, and trust-boundary violations',
+    capabilities: ['read_diff', 'read_repository', 'inspect_auth_boundaries', 'inspect_data_flows'],
   },
   {
     name: 'Reliability Agent',
     skillName: 'prguard-reliability',
     category: 'reliability',
     focus: 'exception handling, retries, timeouts, resource cleanup, concurrency, and boundary conditions',
+    capabilities: ['read_diff', 'read_repository', 'inspect_failure_paths', 'inspect_resource_lifecycle'],
   },
   {
     name: 'Code Quality Agent',
     skillName: 'prguard-code-quality',
     category: 'code_quality',
     focus: 'regressions, maintainability, test gaps, API compatibility, and duplicated or fragile logic',
+    capabilities: ['read_diff', 'read_repository', 'inspect_tests', 'inspect_api_compatibility'],
   },
 ] as const
 

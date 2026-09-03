@@ -264,7 +264,7 @@ export async function runMultiAgentPrReview(
   await options.trace?.record('checkpoint', {
     phase: 'agent_plan_created',
     strategy: 'dynamic_route_blackboard_critic_judge',
-    selectedRoles: route.selected.map(role => ({ name: role.name, skillName: role.skillName, focus: role.focus })),
+    selectedRoles: route.selected.map(role => ({ name: role.name, skillName: role.skillName, focus: role.focus, capabilities: role.capabilities })),
     skippedRoles: route.skipped.map(role => role.name),
     routeReasons: route.reasons,
     riskSignals: route.riskSignals,
@@ -314,6 +314,7 @@ export async function runMultiAgentPrReview(
         role: role.name,
         skillName: role.skillName,
         focus: role.focus,
+        capabilities: role.capabilities,
         longTermMemory: options.longTermMemory,
       }),
       onEvent: async event => {

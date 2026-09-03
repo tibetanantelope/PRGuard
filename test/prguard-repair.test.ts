@@ -7,6 +7,7 @@ import {
   applyAndVerifyPatch,
   formatPatch,
   parseModelPatchOutput,
+  repairWithVerificationRetries,
   runVerificationCommand,
 } from '../src/prguard/index.js'
 import { runGitCommand } from '../src/prguard/index.js'
@@ -21,6 +22,31 @@ index 1111111..2222222 100644
 `
 
 describe('PRGuard repair', () => {
+  it('feeds failed verification back into a bounded repair retry', async () => {
+    const feedback: string[] = []
+    let generated = 0
+    const result = await repairWithVerificationRetries(
+      async context => {
+        generated += 1
+        if (context.previous) feedback.push(context.previous.verificationOutput)
+        return makePatch()
+      },
+      async () => ({
+        patch: makePatch(),
+        verification: {
+          status: generated === 1 ? 'failed' : 'passed',
+          command: 'npm test',
+          output: generated === 1 ? 'assertion failed' : 'ok',
+          isolation: 'local-process',
+        },
+      }),
+    )
+
+    assert.equal(result.attempts.length, 2)
+    assert.equal(result.final.verification.status, 'passed')
+    assert.deepEqual(feedback, ['assertion failed'])
+  })
+
   it('parses a model patch and keeps it pending', () => {
     const patch = parseModelPatchOutput(`
       {

@@ -36,6 +36,16 @@ export type PatchApplicationResult = {
   }
 }
 
+export type RepairLoopResult = {
+  attempts: Array<{
+    attempt: number
+    patch?: Patch
+    application?: PatchApplicationResult
+    error?: string
+  }>
+  final: PatchApplicationResult
+}
+
 function extractJsonObject(content: string): unknown {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)
   const candidate = fenced?.[1]?.trim() ?? content.trim()
@@ -79,7 +89,7 @@ export async function generatePatch(
   review: ReviewResult,
   findingIds: string[],
   runtime: RuntimeConfig,
-  options: { model?: ModelAdapter; maxSteps?: number; trace?: PrGuardTrace } = {},
+  options: { model?: ModelAdapter; maxSteps?: number; trace?: PrGuardTrace; verificationFeedback?: string } = {},
 ): Promise<Patch> {
   const selected = review.findings.filter(finding => findingIds.includes(finding.id))
   if (selected.length !== findingIds.length) {
@@ -125,7 +135,7 @@ export async function generatePatch(
     },
     messages: [
       { role: 'system', content: buildPatchSystemPrompt() },
-      { role: 'user', content: buildPatchUserPrompt(snapshot, review, findingIds) },
+      { role: 'user', content: buildPatchUserPrompt(snapshot, review, findingIds, options.verificationFeedback) },
     ],
   })
   const finalMessage = [...messages]
@@ -335,6 +345,43 @@ export async function applyAndVerifyPatch(
       isolated: true,
     })
   }
+}
+
+/**
+ * Bounded repair loop: each candidate is verified in isolation and failed
+ * candidates are rolled back before the next candidate is generated.
+ */
+export async function repairWithVerificationRetries(
+  generate: (context: {
+    attempt: number
+    previous?: { patch?: Patch; verificationOutput: string }
+  }) => Promise<Patch>,
+  apply: (patch: Patch) => Promise<PatchApplicationResult>,
+  options: { maxAttempts?: number } = {},
+): Promise<RepairLoopResult> {
+  const maxAttempts = Math.max(1, Math.min(5, options.maxAttempts ?? 3))
+  const attempts: RepairLoopResult['attempts'] = []
+  let previous: { patch?: Patch; verificationOutput: string } | undefined
+  let lastError: Error | undefined
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const patch = await generate({ attempt, previous })
+      const application = await apply(patch)
+      attempts.push({ attempt, patch, application })
+      if (application.verification.status === 'passed') return { attempts, final: application }
+      previous = { patch, verificationOutput: application.verification.output }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      attempts.push({ attempt, error: message })
+      lastError = error instanceof Error ? error : new Error(message)
+      previous = { verificationOutput: message }
+    }
+  }
+
+  throw new Error(
+    `PRGuard repair exhausted ${maxAttempts} attempts.${lastError ? ` Last error: ${lastError.message}` : ''}`,
+  )
 }
 
 export function formatPatch(patch: Patch): string {

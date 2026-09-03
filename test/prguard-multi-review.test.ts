@@ -100,6 +100,15 @@ describe('PRGuard multi-agent review', () => {
     assert.match(prompt, /authorization and injection/)
   })
 
+  it('declares a bounded capability contract for each specialist', () => {
+    const prompt = buildPrReviewSystemPrompt({
+      role: 'Security Agent',
+      capabilities: ['read_diff', 'inspect_auth_boundaries'],
+    })
+    assert.match(prompt, /read_diff, inspect_auth_boundaries/)
+    assert.match(prompt, /read-only scope/)
+  })
+
   it('deduplicates corroborated findings and raises confidence', () => {
     const result = aggregateAgentReviews(
       snapshot,
