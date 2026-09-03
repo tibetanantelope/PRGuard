@@ -3,6 +3,7 @@ import path from 'node:path'
 import { MINI_CODE_DIR } from '../config.js'
 import { createId } from '../runtime/ids.js'
 import type { LongTermMemoryItem, MemorySearchQuery, MemoryStore } from './types.js'
+import { defaultMemoryTrust, redactMemoryContent } from './safety.js'
 
 function safeProjectId(projectId: string): string {
   const value = projectId.trim()
@@ -61,6 +62,7 @@ export class LongTermMemoryStore implements MemoryStore {
     if (item.confidence < 0 || item.confidence > 1) throw new Error('Memory confidence must be between 0 and 1.')
     const record: LongTermMemoryItem = {
       ...item,
+      content: redactMemoryContent(item.content.trim()),
       id: item.id ?? createId('memory'),
       kind: this.kind,
       projectId: safeProjectId(item.projectId),
@@ -70,6 +72,8 @@ export class LongTermMemoryStore implements MemoryStore {
       usageCount: item.usageCount ?? 0,
       successCount: item.successCount ?? 0,
       failureCount: item.failureCount ?? 0,
+      trustLevel: item.trustLevel ?? defaultMemoryTrust(item.source, item.content),
+      schemaVersion: item.schemaVersion ?? 1,
     }
     await mkdir(this.baseDir, { recursive: true })
     await appendFile(this.filePath(record.projectId), `${JSON.stringify(record)}\n`, 'utf8')

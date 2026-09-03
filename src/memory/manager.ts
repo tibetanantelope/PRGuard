@@ -53,10 +53,11 @@ export class AgentMemoryManager {
         ? new HashMemoryEmbeddingProvider(dimensions)
         : this.createEmbeddingProvider(dimensions, options)
     const embed = (text: string) => embeddings.embed(text)
-    this.episodic = usePostgres ? new PostgresLongTermMemoryStore('episodic', postgresUrl, undefined, embed) : new EpisodicMemoryStore(baseDir)
-    this.semantic = usePostgres ? new PostgresLongTermMemoryStore('semantic', postgresUrl, undefined, embed) : new SemanticMemoryStore(baseDir)
-    this.procedural = usePostgres ? new PostgresLongTermMemoryStore('procedural', postgresUrl, undefined, embed) : new LongTermMemoryStore('procedural', baseDir)
-    this.feedback = usePostgres ? new PostgresLongTermMemoryStore('feedback', postgresUrl, undefined, embed) : new FindingFeedbackStore(baseDir)
+    const embeddingInfo = { model: options.embeddingModel ?? process.env.PR_GUARD_EMBEDDING_MODEL, dimensions }
+    this.episodic = usePostgres ? new PostgresLongTermMemoryStore('episodic', postgresUrl, undefined, embed, embeddingInfo) : new EpisodicMemoryStore(baseDir)
+    this.semantic = usePostgres ? new PostgresLongTermMemoryStore('semantic', postgresUrl, undefined, embed, embeddingInfo) : new SemanticMemoryStore(baseDir)
+    this.procedural = usePostgres ? new PostgresLongTermMemoryStore('procedural', postgresUrl, undefined, embed, embeddingInfo) : new LongTermMemoryStore('procedural', baseDir)
+    this.feedback = usePostgres ? new PostgresLongTermMemoryStore('feedback', postgresUrl, undefined, embed, embeddingInfo) : new FindingFeedbackStore(baseDir)
     this.retriever = new MemoryRetriever(this.episodic, this.semantic, this.feedback, embeddings, this.procedural)
     this.consolidator = new MemoryConsolidator(this.episodic, this.semantic)
   }

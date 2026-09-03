@@ -22,12 +22,20 @@ CREATE TABLE IF NOT EXISTS memories (
   embedding vector(1536),
   embedding_status TEXT NOT NULL DEFAULT 'pending' CHECK (embedding_status IN ('pending', 'ready', 'failed')),
   embedding_attempts INTEGER NOT NULL DEFAULT 0,
-  embedding_last_error TEXT
+  embedding_last_error TEXT,
+  trust_level TEXT NOT NULL DEFAULT 'observed' CHECK (trust_level IN ('untrusted', 'observed', 'human_verified')),
+  embedding_model TEXT,
+  embedding_dimensions INTEGER,
+  schema_version INTEGER NOT NULL DEFAULT 1
 );
 
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_last_error TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS trust_level TEXT NOT NULL DEFAULT 'observed';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS memory_embedding_outbox (
   memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
@@ -40,8 +48,22 @@ CREATE TABLE IF NOT EXISTS memory_embedding_outbox (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS memory_access_audit (
+  id BIGSERIAL PRIMARY KEY,
+  memory_id TEXT,
+  project_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('write', 'retrieve', 'archive', 'reinforce', 'embedding_retry')),
+  actor TEXT NOT NULL DEFAULT 'agent-runtime',
+  metadata JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS memory_embedding_outbox_ready_idx
   ON memory_embedding_outbox(status, next_attempt_at);
+
+CREATE INDEX IF NOT EXISTS memory_access_audit_project_idx
+  ON memory_access_audit(project_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS memories_project_status_idx
   ON memories(project_id, status);
@@ -54,6 +76,9 @@ CREATE INDEX IF NOT EXISTS memories_tags_idx
 
 CREATE INDEX IF NOT EXISTS memories_metadata_idx
   ON memories USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS memories_trust_idx
+  ON memories(project_id, trust_level, status);
 
 CREATE INDEX IF NOT EXISTS memories_conflict_key_idx
   ON memories(project_id, ((metadata->>'conflictKey')))

@@ -72,3 +72,5 @@ node --import tsx --test test/memory-v2.test.ts
 当前正式长期记忆后端为 PostgreSQL + pgvector，业务数据仍由 MySQL 保存，Redis 负责异步任务。Store 与 Embedding Provider 已解耦：PostgreSQL 后端支持远程 Embedding，JSONL + hash 仍保留给离线单元测试和无基础设施开发。当前部署是单实例本地/开发架构，尚未声称具备数据库高可用、分布式分片或跨区域容灾能力。
 
 PostgreSQL 初始化脚本位于 `infra/postgres/init/002_memory.sql`。当 Embedding API 暂时失败时，记忆先以 `failed` 状态保存，并进入 `memory_embedding_outbox`，可通过 `npm.cmd run memory:retry-embeddings` 重试。
+
+部署时可运行 `npm.cmd run memory:retry-worker` 启动常驻重试进程；它使用 `FOR UPDATE SKIP LOCKED` 领取任务，允许多个实例并发运行而不重复处理同一条 Outbox 记录。轮询间隔可通过 `PR_GUARD_MEMORY_RETRY_INTERVAL_MS` 调整。

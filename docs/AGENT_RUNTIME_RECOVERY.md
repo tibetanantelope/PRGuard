@@ -12,7 +12,7 @@ PRGuard 的 Runtime 不只保存聊天记录，还持久化“任务执行到哪
 - `status`：pending、running、completed、failed 或 skipped；
 - `attempts`、`idempotencyKey`、`resultRef` 和错误信息。
 
-Agent Loop 在真实工具调用前激活能力匹配的可执行步骤，成功后记录结果引用并推进后继步骤；失败后将当前步骤标为 failed，生成 recovery 步骤并重建尚未完成的依赖关系。计划状态会注入模型上下文，同时写入 Working Memory 和 Checkpoint，因此不是只用于展示的静态清单。
+Agent Loop 在真实工具调用前激活能力匹配的可执行步骤，成功后记录结果引用并推进后继步骤；失败后将当前步骤标为 failed，生成 recovery 步骤并重建尚未完成的依赖关系。每次安装或重规划都会执行重复 ID、缺失依赖和 DAG 环校验；同一失败步骤最多尝试三次，之后标记为 skipped 并保留失败原因。计划状态会注入模型上下文，同时写入 Working Memory 和 Checkpoint，因此不是只用于展示的静态清单。
 
 ## Checkpoint 内容与恢复入口
 

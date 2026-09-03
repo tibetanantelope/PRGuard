@@ -23,6 +23,10 @@ export type LongTermMemoryItem = {
   embeddingStatus?: 'pending' | 'ready' | 'failed'
   embeddingAttempts?: number
   embeddingLastError?: string
+  trustLevel?: 'untrusted' | 'observed' | 'human_verified'
+  embeddingModel?: string
+  embeddingDimensions?: number
+  schemaVersion?: number
 }
 
 export type MemoryProvenance = {
@@ -71,6 +75,7 @@ export type MemoryRetrievalConfig = {
   reinforcement: boolean
   conflictResolution: boolean
   deduplication: boolean
+  allowUntrusted?: boolean
 }
 
 export type MemoryCapacityPolicy = {

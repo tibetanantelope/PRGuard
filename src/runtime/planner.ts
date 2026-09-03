@@ -12,6 +12,50 @@ export type AgentPlanner = {
   replan(input: PlannerInput): Promise<TaskStep[]> | TaskStep[]
 }
 
+export class InvalidPlanError extends Error {
+  constructor(readonly problems: string[]) {
+    super(`Invalid agent plan: ${problems.join('; ')}`)
+    this.name = 'InvalidPlanError'
+  }
+}
+
+export function validatePlan(plan: TaskStep[]): void {
+  const problems: string[] = []
+  const ids = new Set<string>()
+  for (const item of plan) {
+    if (ids.has(item.id)) problems.push(`duplicate step id ${item.id}`)
+    ids.add(item.id)
+    if (!item.description.trim()) problems.push(`step ${item.id} has no description`)
+    if (!item.acceptanceCriteria.trim()) problems.push(`step ${item.id} has no acceptance criteria`)
+    if (item.attempts < 0 || !Number.isInteger(item.attempts)) problems.push(`step ${item.id} has invalid attempts`)
+    if (item.dependsOn.includes(item.id)) problems.push(`step ${item.id} depends on itself`)
+  }
+  for (const item of plan) {
+    for (const dependency of item.dependsOn) {
+      if (!ids.has(dependency)) problems.push(`step ${item.id} depends on missing step ${dependency}`)
+    }
+  }
+  // Kahn's algorithm catches dependency cycles before execution.
+  const remaining = new Map(plan.map(item => [item.id, new Set(item.dependsOn)]))
+  let resolved = 0
+  while (remaining.size > 0) {
+    const ready = [...remaining.entries()].filter(([, dependencies]) => dependencies.size === 0)
+    if (ready.length === 0) {
+      problems.push('plan contains a dependency cycle')
+      break
+    }
+    for (const [id] of ready) {
+      remaining.delete(id)
+      resolved += 1
+      for (const dependencies of remaining.values()) dependencies.delete(id)
+    }
+  }
+  if (resolved !== plan.length && !problems.some(problem => problem.includes('cycle'))) {
+    problems.push('plan could not be topologically ordered')
+  }
+  if (problems.length > 0) throw new InvalidPlanError(problems)
+}
+
 function step(description: string, capability: TaskStepCapability, acceptanceCriteria: string, dependsOn: string[] = []): TaskStep {
   const id = createId('step')
   return { id, description, capability, acceptanceCriteria, dependsOn, status: 'pending', attempts: 0, idempotencyKey: id }
@@ -31,6 +75,7 @@ export class HeuristicPlanner implements AgentPlanner {
       steps.push(step('基于检查结果形成结论和可执行建议', 'reasoning', '结论均有检查证据支持', [inspect.id]))
     }
     steps.push(step('汇总结果、风险和未完成事项', 'report', '最终答复说明结果、验证和剩余风险', [steps.at(-1)!.id]))
+    validatePlan(steps)
     return steps
   }
 
@@ -40,21 +85,32 @@ export class HeuristicPlanner implements AgentPlanner {
         .filter(item => item.status === 'completed' || item.status === 'skipped')
         .map(item => item.id),
     )
-    const remaining = input.workingMemory.plan
+    const failedStepId = input.workingMemory.activeStep
+      ?? input.workingMemory.plan.find(item => item.status === 'failed')?.id
+    const remaining: TaskStep[] = input.workingMemory.plan
       .filter(item => item.status !== 'completed' && item.status !== 'skipped')
       .map(item => ({
         ...item,
         status: 'pending' as const,
+        attempts: item.id === failedStepId ? item.attempts + 1 : item.attempts,
         error: undefined,
         resultRef: undefined,
         dependsOn: item.dependsOn.filter(dependency => !satisfied.has(dependency)),
       }))
+    const active = remaining.find(item => item.id === failedStepId)
+    if (active && active.attempts >= 3) {
+      active.status = 'skipped'
+      active.resultRef = 'replan:attempt-limit'
+      active.error = `retry limit reached after failure: ${input.error ?? 'unknown error'}`
+    }
     const recovery = step(`处理上一步失败并调整方案：${input.error?.slice(0, 240) ?? '未知错误'}`, 'recovery', '失败原因已处理或形成可执行替代方案')
-    return [
+    const replanned = [
       recovery,
       ...remaining.map(item => item.dependsOn.length === 0
         ? { ...item, dependsOn: [recovery.id] }
         : item),
     ]
+    validatePlan(replanned)
+    return replanned
   }
 }

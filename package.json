@@ -15,7 +15,8 @@
     "install-local": "tsx src/install.ts",
     "memory:migrate": "tsx src/memory/migrate.ts",
     "memory:smoke": "tsx src/memory/smoke.ts",
-    "memory:retry-embeddings": "tsx src/memory/retry.ts"
+    "memory:retry-embeddings": "tsx src/memory/retry.ts",
+    "memory:retry-worker": "tsx src/memory/retry-worker.ts"
   },
   "dependencies": {
     "@types/pg": "^8.23.1",

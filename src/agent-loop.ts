@@ -43,7 +43,7 @@ import {
 import type { LongTermMemoryItem } from './memory/types.js'
 import type { AgentMemoryManager } from './memory/manager.js'
 import type { RuntimeTrace } from './runtime/trace.js'
-import { HeuristicPlanner, type AgentPlanner } from './runtime/planner.js'
+import { HeuristicPlanner, validatePlan, type AgentPlanner } from './runtime/planner.js'
 import { ToolExecutionLedger } from './runtime/execution-ledger.js'
 import type { TaskStepCapability } from './runtime/types.js'
 import { createId } from './runtime/ids.js'
@@ -247,6 +247,7 @@ export async function runAgentTurn(args: {
     const goal = runtimeState.workingMemory.goal || [...args.messages].reverse().find(message => message.role === 'user')?.content
     if (typeof goal !== 'string' || !goal.trim()) return
     const plan = await planner.plan({ goal, workingMemory: runtimeState.workingMemory })
+    validatePlan(plan)
     await publishRuntimeState({
       ...runtimeState,
       workingMemory: { ...runtimeState.workingMemory, plan },
@@ -439,6 +440,7 @@ export async function runAgentTurn(args: {
           workingMemory: runtimeState.workingMemory,
           error: recoveredResult.output,
         })
+        validatePlan(plan)
         await publishRuntimeState({
           ...runtimeState,
           workingMemory: { ...runtimeState.workingMemory, plan },
@@ -826,6 +828,7 @@ export async function runAgentTurn(args: {
         if (runtimeState) {
           const goal = runtimeState.workingMemory.goal
           const plan = await planner.replan({ goal, workingMemory: runtimeState.workingMemory, error: result.output })
+          validatePlan(plan)
           await publishRuntimeState({
             ...runtimeState,
             workingMemory: { ...runtimeState.workingMemory, plan },

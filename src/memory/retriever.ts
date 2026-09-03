@@ -219,6 +219,7 @@ export class MemoryRetriever {
     const scored = await Promise.all([...semantic, ...episodic, ...procedural, ...feedback]
       .filter(item => !query.category || item.category === query.category)
       .filter(item => wantedTags.size === 0 || [...wantedTags].some(tag => item.tags.includes(tag)))
+      .filter(item => config.allowUntrusted === true || item.trustLevel !== 'untrusted')
       .filter(item => item.source === 'human' || item.confidence >= 0.55)
       .map(async item => {
         const lexical = lexicalScore(queryTerms, new Set(memoryTerms(memoryText(item))))
