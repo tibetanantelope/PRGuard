@@ -94,11 +94,15 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
     options.jobBaseDir ? `${options.jobBaseDir}/github-deliveries.json` : undefined,
   )
   const workerAbort = new AbortController()
-  const rateLimiter = options.rateLimiter ?? createPrGuardRateLimiter(options.runtime.prGuardRateLimitPerMinute ?? 120, options.runtime.prGuardRedisUrl)
+  // The queue factory also honors PR_GUARD_REDIS_URL from the process environment.
+  // Keep the worker lifecycle decision consistent with that factory so a test or
+  // embedded caller cannot accidentally start a Redis worker and close it early.
+  const redisUrl = options.runtime.prGuardRedisUrl ?? (process.env.PR_GUARD_REDIS_URL?.trim() || undefined)
+  const rateLimiter = options.rateLimiter ?? createPrGuardRateLimiter(options.runtime.prGuardRateLimitPerMinute ?? 120, redisUrl)
   const auditLog = options.auditLog ?? new PrGuardAuditLog(options.jobBaseDir ? `${options.jobBaseDir}/audit.jsonl` : undefined)
   const sandboxReadiness = options.sandboxReadiness ?? (() =>
     checkVerificationSandbox(options.runtime.prGuardSandboxMode ?? 'docker'))
-  if (!options.runtime.prGuardRedisUrl) {
+  if (!redisUrl) {
     void new ReviewWorker(jobService).run({
       signal: workerAbort.signal,
       reclaimIdleMs: options.runtime.prGuardRedisReclaimIdleMs,
