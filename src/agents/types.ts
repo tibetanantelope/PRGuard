@@ -21,3 +21,13 @@ export type WaitForSubAgentsResult = {
   timedOut: boolean
   agents: SubAgentSnapshot[]
 }
+
+export type SubAgentAggregate = {
+  requested: number
+  completed: number
+  failed: number
+  closed: number
+  pending: number
+  reports: Array<{ agentId: string; task: string; report: string }>
+  errors: Array<{ agentId: string; task: string; error: string }>
+}

@@ -7,7 +7,7 @@ PRGuard 是一个面向研发流程的 PR 风险治理与安全修复 Agent，�
 ## 简历版本
 
 **PRGuard｜面向研发流程的 PR 风险治理与安全修复 Agent**  
-TypeScript / Node.js / Redis Streams / MySQL / GitHub API / Prometheus
+TypeScript / Node.js / Redis Streams / MySQL / PostgreSQL + pgvector / Embedding API / GitHub API / Prometheus
 
 - 设计 API + Worker 异步架构，通过 Redis Streams Consumer Group、XAUTOCLAIM、Heartbeat、重试和 Dead Letter 实现任务恢复，避免 Worker 崩溃导致任务丢失或重复执行。
 - 构建 Security、Reliability、Code Quality 多 Agent 审查流程，引入 Finding 聚合和 Evidence Verifier，拒绝无变更依据或无效证据的风险结论。
@@ -23,4 +23,4 @@ TypeScript / Node.js / Redis Streams / MySQL / GitHub API / Prometheus
 
 ## 面试关键词
 
-Redis Streams 可靠消费、XAUTOCLAIM、幂等、Agent Runtime、Evidence Verification、Human-in-the-loop、Git Worktree 隔离、Patch Rollback、GitHub Webhook、Prometheus、评测门禁。
+Redis Streams 可靠消费、XAUTOCLAIM、幂等、Agent Runtime、Evidence Verification、Human-in-the-loop、Git Worktree 隔离、Patch Rollback、PostgreSQL + pgvector Memory、GitHub Webhook、Prometheus、评测门禁。

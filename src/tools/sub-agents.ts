@@ -124,5 +124,18 @@ export function createSubAgentTools(
     },
   }
 
-  return [spawnAgentTool, listAgentsTool, waitAgentTool, closeAgentTool]
+  const aggregateAgentsTool: ToolDefinition<{ agent_ids?: string[] }> = {
+    name: 'aggregate_agents',
+    description: 'Aggregate completed sub-agent reports and failures into one structured result. Omit agent_ids to aggregate all agents.',
+    inputSchema: {
+      type: 'object',
+      properties: { agent_ids: { type: 'array', items: { type: 'string' } } },
+    },
+    schema: z.object({ agent_ids: z.array(z.string().min(1)).optional() }),
+    async run(input) {
+      return { ok: true, output: JSON.stringify(manager.aggregate(input.agent_ids), null, 2) }
+    },
+  }
+
+  return [spawnAgentTool, listAgentsTool, waitAgentTool, closeAgentTool, aggregateAgentsTool]
 }

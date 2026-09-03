@@ -17,13 +17,36 @@ CREATE TABLE IF NOT EXISTS review_jobs (
   input_json JSON NOT NULL,
   attempts INT UNSIGNED NOT NULL DEFAULT 0,
   max_attempts INT UNSIGNED NOT NULL DEFAULT 3,
+  fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  lease_owner VARCHAR(128) NULL,
+  lease_expires_at DATETIME(3) NULL,
+  github_feedback_published_at DATETIME(3) NULL,
+  publish_feedback BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by VARCHAR(191) NULL,
   run_id VARCHAR(64) NULL,
   result_json JSON NULL,
   error_message TEXT NULL,
   created_at DATETIME(3) NOT NULL,
   updated_at DATETIME(3) NOT NULL,
   KEY idx_review_jobs_status_created (status, created_at),
+  KEY idx_review_jobs_lease_expiry (status, lease_expires_at),
   KEY idx_review_jobs_run_id (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS review_job_outbox (
+  id CHAR(32) NOT NULL PRIMARY KEY,
+  job_id VARCHAR(64) NOT NULL,
+  event_kind VARCHAR(32) NOT NULL,
+  idempotency_key VARCHAR(191) NOT NULL,
+  available_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  publish_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+  published_at DATETIME(3) NULL,
+  last_error TEXT NULL,
+  source_dead_letter_id VARCHAR(128) NULL,
+  UNIQUE KEY uk_review_job_outbox_idempotency (idempotency_key),
+  KEY idx_review_job_outbox_due (status, available_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS reviews (

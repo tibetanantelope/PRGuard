@@ -15,6 +15,7 @@ import {
   formatReviewResult,
   loadGithubPrDiffSnapshot,
   loadPrDiffSnapshot,
+  projectAuthorizationId,
 } from './prguard/index.js'
 import {
   formatPatch,
@@ -25,7 +26,10 @@ import { evalExperimentModes, formatExperimentSummary, runPrGuardEvaluation, typ
 import { startPrGuardServer } from './prguard/http.js'
 import { ReviewJobService, ReviewWorker } from './prguard/jobs.js'
 import { startPrGuardMetricsServer } from './prguard/observability.js'
+import { PrGuardMemoryService, type FindingDecision } from './prguard/memory.js'
 import { createInterface } from 'node:readline/promises'
+import { CheckpointManager } from './runtime/checkpoint.js'
+import { listRuntimeTraces, loadRuntimeTrace } from './runtime/trace.js'
 import process from 'node:process'
 
 function printUsage(): void {
@@ -48,11 +52,16 @@ minicode pr trace list
 minicode pr trace show <run-id>
 minicode pr trace replay <run-id>
 minicode pr trace resume <run-id> [--multi-agent]
+minicode pr feedback --review-run <run-id> --finding <id> --decision <accepted|rejected|modified> [--reason <text>]
+minicode pr dead-letter list | redrive <dead-letter-id>
+minicode pr project-id
 minicode pr eval [--dataset <tasks.jsonl>] [--baseline | --predictions <file>] [--compare-baseline] [--gate] [--min-f1 <0..1>] [--min-high-risk-recall <0..1>] [--max-failure-rate <0..1>] [--min-patch-pass-rate <0..1>] [--json]
 minicode pr eval-run --mode <rule-baseline|single-agent|multi-agent|multi-agent-verifier|adaptive> [--dataset <tasks.jsonl>] [--output <dir>] [--split <validation|holdout>] [--model <name>] [--prompt-version <version>] [--json]
 GitHub PR reviews can use --github owner/repo#123 or https://github.com/owner/repo/pull/123.
 minicode pr serve [--host <host>] [--port <port>]
 minicode pr worker`)
+  console.log('minicode runtime trace list | show <run-id> | replay <run-id>')
+  console.log('minicode runtime checkpoint show <run-id>')
 }
 
 function parseScope(args: string[]): {
@@ -295,8 +304,76 @@ async function handleSkillsCommand(cwd: string, args: string[]): Promise<boolean
   return true
 }
 
+async function handleRuntimeCommand(rest: string[]): Promise<boolean> {
+  const [resource, command, runId] = rest
+  if (resource === 'trace') {
+    if (command === 'list') {
+      const runs = await listRuntimeTraces()
+      console.log(runs.length > 0 ? runs.join('\n') : 'No runtime traces found.')
+      return true
+    }
+    if ((command === 'show' || command === 'replay') && runId) {
+      const events = await loadRuntimeTrace(runId)
+      if (command === 'replay') {
+        console.log(events.map(event => `${String(event.sequence).padStart(3, '0')} ${event.timestamp.slice(11, 19)} ${event.type} ${JSON.stringify(event.payload)}`).join('\n'))
+      } else {
+        console.log(JSON.stringify(events, null, 2))
+      }
+      return true
+    }
+  }
+  if (resource === 'checkpoint' && command === 'show' && runId) {
+    const checkpoint = await new CheckpointManager().latest(runId)
+    console.log(checkpoint ? JSON.stringify(checkpoint, null, 2) : 'Checkpoint not found.')
+    return true
+  }
+  printUsage()
+  return true
+}
+
 async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
   const [subcommand, ...rest] = args
+  if (subcommand === 'project-id') {
+    if (rest.length > 0) throw new Error('`minicode pr project-id` does not accept arguments.')
+    console.log(projectAuthorizationId(cwd))
+    return true
+  }
+  if (subcommand === 'dead-letter') {
+    const [command, deadLetterId, ...extra] = rest
+    if (extra.length > 0) throw new Error(`Unknown arguments: ${extra.join(' ')}`)
+    const runtime = await loadRuntimeConfig()
+    const service = new ReviewJobService(runtime)
+    try {
+      if (command === 'list') {
+        console.log(JSON.stringify({ deadLetters: await service.listDeadLetters() }, null, 2))
+        return true
+      }
+      if (command === 'redrive' && deadLetterId) {
+        console.log(JSON.stringify(await service.redriveDeadLetter(deadLetterId), null, 2))
+        return true
+      }
+      throw new Error('Use `minicode pr dead-letter list` or `minicode pr dead-letter redrive <id>`.')
+    } finally {
+      await service.close()
+    }
+  }
+  if (subcommand === 'feedback') {
+    const feedbackArgs = [...rest]
+    const reviewRunId = takeOption(feedbackArgs, '--review-run')
+    const findingId = takeOption(feedbackArgs, '--finding')
+    const decision = takeOption(feedbackArgs, '--decision') as FindingDecision | undefined
+    const reason = takeOption(feedbackArgs, '--reason')
+    if (feedbackArgs.length > 0) throw new Error(`Unknown arguments: ${feedbackArgs.join(' ')}`)
+    if (!reviewRunId || !findingId || !decision) throw new Error('Feedback requires --review-run, --finding, and --decision.')
+    if (!['accepted', 'rejected', 'modified'].includes(decision)) throw new Error('Invalid feedback decision.')
+    const events = await new TraceService().load(reviewRunId)
+    const completed = [...events].reverse().find(event => event.type === 'review_completed' && event.payload.result)
+    if (!completed) throw new Error(`Review result not found in trace ${reviewRunId}.`)
+    const review = reviewResultSchema.parse(completed.payload.result)
+    const recorded = await new PrGuardMemoryService(cwd).recordFindingDecision(review, findingId, decision, reason)
+    console.log(JSON.stringify({ recorded: true, memoryId: recorded.id, findingId, decision }, null, 2))
+    return true
+  }
   if (subcommand === 'serve') {
     const serveArgs = [...rest]
     const host = takeOption(serveArgs, '--host') ?? '127.0.0.1'
@@ -507,8 +584,8 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     const trace = await traceService.create(snapshot.input)
     await trace.record('checkpoint', { phase: 'review_started' })
     let patch
+    let review
     try {
-      let review
       if (reviewRunId) {
         const events = await traceService.load(reviewRunId)
         const completed = [...events].reverse().find(event =>
@@ -555,6 +632,13 @@ async function handlePrCommand(cwd: string, args: string[]): Promise<boolean> {
     }
 
     await trace.record('approval', { approved: true })
+    await repairService.recordFindingDecisions(
+      cwd,
+      review,
+      [findingId],
+      'accepted',
+      'Patch application approved by the user.',
+    )
     const applied = await repairService.apply(cwd, patch, testCommand, trace)
     await trace.record('run_finished', { status: applied.patch.status })
     await trace.flush()
@@ -649,6 +733,10 @@ export async function maybeHandleManagementCommand(
 
   if (category === 'pr') {
     return handlePrCommand(cwd, rest)
+  }
+
+  if (category === 'runtime') {
+    return handleRuntimeCommand(rest)
   }
 
   if (category === 'help' || category === '--help' || category === '-h') {

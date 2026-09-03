@@ -10,6 +10,14 @@
 - `patches`：Agent 生成的修复补丁及其状态。
 - `trace_events`：模型请求、工具调用、审查完成和失败等运行事件。
 
+## PostgreSQL + pgvector 中保存什么
+
+- `memories`：项目隔离的 Episodic、Semantic、Procedural 和 Feedback 长期记忆。
+- `embedding`：由配置的 Embedding Provider 生成的向量，用于语义相似度检索。
+- `memory_embedding_outbox`：Embedding 失败后的持久化重试任务。
+
+MySQL 负责 PRGuard 业务实体，PostgreSQL 负责长期记忆检索，两者不共享业务表。Memory 未配置 PostgreSQL 时仍可使用 JSONL fallback，适合单元测试。
+
 审查和 Finding 使用事务写入；同一审查重复保存时会先清理旧 Finding，因此任务重试不会产生重复风险项。Trace 使用 `(run_id, sequence_no)` 幂等写入。
 
 ## 运行方式

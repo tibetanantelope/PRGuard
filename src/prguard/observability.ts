@@ -1,5 +1,6 @@
 import http from 'node:http'
 import type { PrGuardTraceEvent } from './trace.js'
+import { redactSensitiveValue } from './redaction.js'
 
 type Labels = Record<string, string>
 
@@ -115,18 +116,5 @@ export async function startPrGuardMetricsServer(
 
 export function logPrGuardEvent(event: string, fields: Record<string, unknown> = {}): void {
   // One JSON object per line makes the service logs ingestible by Loki, ELK, or a shell pipeline.
-  console.log(JSON.stringify({ timestamp: new Date().toISOString(), service: 'prguard', event, ...redactFields(fields) }))
-}
-
-function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
-  return redactValue(fields) as Record<string, unknown>
-}
-
-function redactValue(value: unknown, fieldName = ''): unknown {
-  if (/(token|secret|password|authorization|api[-_]?key)/i.test(fieldName)) return '[REDACTED]'
-  if (Array.isArray(value)) return value.map(item => redactValue(item))
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([name, nested]) => [name, redactValue(nested, name)]))
-  }
-  return value
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), service: 'prguard', event, ...redactSensitiveValue(fields) as Record<string, unknown> }))
 }

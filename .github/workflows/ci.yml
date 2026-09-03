@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: prguard
+          POSTGRES_USER: prguard
+          POSTGRES_PASSWORD: prguard_dev_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U prguard -d prguard"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run unit and integration tests
+        env:
+          PRGUARD_REDIS_INTEGRATION: '1'
+          PR_GUARD_REDIS_URL: redis://127.0.0.1:6379
+          PRGUARD_POSTGRES_INTEGRATION: '1'
+          PR_GUARD_POSTGRES_URL: postgresql://prguard:prguard_dev_password@127.0.0.1:5432/prguard
+        run: npm test

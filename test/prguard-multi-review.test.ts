@@ -11,6 +11,10 @@ import {
 import type { PrDiffSnapshot, ReviewResult } from '../src/prguard/types.js'
 import type { ModelAdapter } from '../src/types.js'
 import type { RuntimeConfig } from '../src/config.js'
+import { CheckpointManager, CheckpointStore, WorkingMemoryStore } from '../src/runtime/index.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 const snapshot: PrDiffSnapshot = {
   input: { cwd: 'D:/workspace/demo', diffText: 'diff' },
@@ -111,6 +115,8 @@ describe('PRGuard multi-agent review', () => {
     assert.equal(result.aggregation.supportedFindingCount, 1)
     assert.equal(result.findings[0]?.confidence, 0.9)
     assert.equal(result.findings[0]?.id, 'finding-1')
+    assert.deepEqual(result.findings[0]?.provenance?.sourceAgents, ['Security Reviewer', 'Security Agent'])
+    assert.equal(result.findings[0]?.provenance?.supportCount, 2)
   })
 
   it('rejects findings outside a specialist category and suppresses unsupported low-risk findings', () => {
@@ -209,13 +215,35 @@ describe('PRGuard multi-agent review', () => {
     const result = await runMultiAgentPrReview(snapshot, runtime, {
       model: emptyReviewModel(1),
       specialistRetries: 1,
-      specialistTimeoutMs: 100,
+      // Keep this above the CI/event-loop jitter range; this case verifies model
+      // retry isolation, not timeout behavior.
+      specialistTimeoutMs: 1_000,
     })
 
     assert.equal(result.agents.length, 3)
     assert.equal(result.agents.every(agent => agent.attempts === 1 || agent.attempts === 2), true)
     assert.equal(result.agents.filter(agent => agent.failed).length, 0)
     assert.equal(result.aggregation.fallbackUsed, false)
+    assert.equal(result.aggregation.blackboardVersion, 5)
+    assert.deepEqual(result.orchestration?.route.selectedAgents, [
+      'Security Agent', 'Reliability Agent', 'Code Quality Agent',
+    ])
+    assert.equal(result.orchestration?.budget.modelCalls, 4)
+    assert.equal(result.orchestration?.budget.remainingModelCalls !== undefined, true)
+  })
+
+  it('dispatches only the routed specialist for a documentation-only review', async () => {
+    const docsSnapshot: PrDiffSnapshot = {
+      ...snapshot,
+      input: { cwd: snapshot.input.cwd, diffText: 'diff --git a/README.md b/README.md\n+Document the response format.' },
+      diffText: 'diff --git a/README.md b/README.md\n+Document the response format.',
+      changedFiles: [{ path: 'README.md', status: 'modified', additions: 1, deletions: 0, hunks: [] }],
+    }
+    const result = await runMultiAgentPrReview(docsSnapshot, runtime, { model: emptyReviewModel() })
+    assert.deepEqual(result.orchestration?.route.selectedAgents, ['Code Quality Agent'])
+    assert.deepEqual(result.orchestration?.route.skippedAgents, ['Security Agent', 'Reliability Agent'])
+    assert.equal(result.agents.length, 1)
+    assert.equal(result.orchestration?.budget.modelCalls, 1)
   })
 
   it('uses Single-Agent fallback when every specialist fails', async () => {
@@ -247,5 +275,69 @@ describe('PRGuard multi-agent review', () => {
     assert.equal(result.routing.escalated, true)
     assert.deepEqual(result.routing.reasons, ['multi_risk_diff'])
     assert.equal(result.aggregation.fallbackUsed, false)
+  })
+
+  it('resumes completed specialists and reruns only the unfinished specialist', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'prguard-specialist-resume-'))
+    try {
+      const manager = new CheckpointManager(
+        new CheckpointStore({ baseDir: path.join(dir, 'checkpoints') }),
+        new WorkingMemoryStore({ baseDir: path.join(dir, 'memory') }),
+      )
+      const calls = new Map<string, number>()
+      let reliabilityFails = true
+      const model: ModelAdapter = { async next(messages) {
+        const prompt = messages.filter(message => message.role === 'system').map(message => message.content).join('\n')
+        const role = prompt.includes('Reliability Agent') ? 'Reliability Agent'
+          : prompt.includes('Code Quality Agent') ? 'Code Quality Agent' : 'Security Agent'
+        calls.set(role, (calls.get(role) ?? 0) + 1)
+        if (role === 'Reliability Agent' && reliabilityFails) throw new Error('simulated specialist crash')
+        return { type: 'assistant', content: '{"findings":[]}' }
+      } }
+      const first = await runMultiAgentPrReview(snapshot, runtime, {
+        model, specialistRetries: 0, checkpointManager: manager, runtimeInputHash: 'resume-input',
+      })
+      assert.equal(first.agents.filter(agent => agent.failed).length, 1)
+      reliabilityFails = false
+      const second = await runMultiAgentPrReview(snapshot, runtime, {
+        model, specialistRetries: 0, checkpointManager: manager, runtimeInputHash: 'resume-input',
+      })
+      assert.equal(calls.get('Security Agent'), 1)
+      assert.equal(calls.get('Code Quality Agent'), 1)
+      assert.equal(calls.get('Reliability Agent'), 2)
+      assert.equal(second.agents.filter(agent => agent.resumed).length, 2)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('invalidates specialist checkpoints when injected long-term memory changes', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'prguard-specialist-memory-key-'))
+    try {
+      const manager = new CheckpointManager(
+        new CheckpointStore({ baseDir: path.join(dir, 'checkpoints') }),
+        new WorkingMemoryStore({ baseDir: path.join(dir, 'memory') }),
+      )
+      let calls = 0
+      const model: ModelAdapter = { async next() {
+        calls += 1
+        return { type: 'assistant', content: '{"findings":[]}' }
+      } }
+      const memory = [{
+        id: 'feedback-1', kind: 'feedback' as const, projectId: 'project-1',
+        content: 'The team rejected this finding.', source: 'human' as const,
+        tags: ['review'], confidence: 1, createdAt: '2026-09-02T00:00:00.000Z',
+      }]
+      await runMultiAgentPrReview(snapshot, runtime, {
+        model, checkpointManager: manager, specialistTimeoutMs: 1_000, longTermMemory: memory,
+      })
+      const resumed = await runMultiAgentPrReview(snapshot, runtime, {
+        model, checkpointManager: manager, specialistTimeoutMs: 1_000, longTermMemory: memory,
+      })
+      await runMultiAgentPrReview(snapshot, runtime, {
+        model, checkpointManager: manager, specialistTimeoutMs: 1_000,
+        longTermMemory: [{ ...memory[0]!, content: 'The team accepted this finding.' }],
+      })
+      assert.equal(resumed.agents.filter(agent => agent.resumed).length, 3)
+      assert.equal(calls, 6)
+    } finally { await rm(dir, { recursive: true, force: true }) }
   })
 })

@@ -1,5 +1,5 @@
-import crypto from 'node:crypto'
 import process from 'node:process'
+import crypto from 'node:crypto'
 import { listBackgroundTasks } from './background-tasks.js'
 import { runAgentTurn } from './agent-loop.js'
 import {
@@ -64,6 +64,9 @@ import type { ToolRegistry } from './tool.js'
 import type { ChatMessage, CompressionResult, ModelAdapter } from './types.js'
 import type { ContextStats } from './utils/token-estimator.js'
 import type { SubAgentManager } from './agents/manager.js'
+import type { AgentMemoryManager } from './memory/index.js'
+import { createRuntimeState, createRuntimeTrace } from './runtime/index.js'
+import type { Checkpoint, CheckpointManager, WorkingMemoryStore } from './runtime/index.js'
 import { computeContextStats } from './utils/token-estimator.js'
 import { manualCompact } from './compact/manual-compact.js'
 import { snipCompactConversation } from './compact/snipCompact.js'
@@ -91,6 +94,9 @@ type TtyAppArgs = {
   sessionId: string
   alreadySavedCount: number
   resumeTarget?: string | 'picker'
+  memoryManager?: AgentMemoryManager
+  workingMemoryStore?: WorkingMemoryStore
+  checkpointManager?: CheckpointManager
 }
 
 type PendingApproval = {
@@ -1038,6 +1044,7 @@ async function handleInput(
   }
 
   const input = (submittedRawInput ?? state.input).trim()
+  let resumeCheckpoint: Checkpoint | null = null
   if (!input) return false
   if (input === '/exit') return true
 
@@ -1369,7 +1376,21 @@ async function handleInput(
     return false
   }
 
-  if (input.startsWith('/')) {
+  if (input === '/continue-run') {
+    resumeCheckpoint = await args.checkpointManager?.latestResumableForMessagesRef(`session:${args.sessionId}`) ?? null
+    if (!resumeCheckpoint) {
+      pushTranscriptEntry(state, { kind: 'assistant', body: 'No incomplete checkpointed run exists in this session.' })
+      return false
+    }
+    if (resumeCheckpoint.messagesSnapshot?.length) {
+      args.messages.length = 0
+      args.messages.push(...resumeCheckpoint.messagesSnapshot)
+    }
+    pushTranscriptEntry(state, {
+      kind: 'assistant',
+      body: `Continuing runtime run ${resumeCheckpoint.runId} from phase ${resumeCheckpoint.phase}.`,
+    })
+  } else if (input.startsWith('/')) {
     const matches = findMatchingSlashCommands(input)
     pushTranscriptEntry(state, {
       kind: 'assistant',
@@ -1382,11 +1403,13 @@ async function handleInput(
   }
 
   await refreshSystemPrompt(args)
-  args.messages.push({ role: 'user', content: input })
-  pushTranscriptEntry(state, {
-    kind: 'user',
-    body: input,
-  })
+  if (!resumeCheckpoint) {
+    args.messages.push({ role: 'user', content: input })
+    pushTranscriptEntry(state, {
+      kind: 'user',
+      body: input,
+    })
+  }
   state.transcriptScrollOffset = 0
   startWelcomeEscapeAnimation(state)
   setStatus(state, 'Thinking...')
@@ -1400,6 +1423,8 @@ async function handleInput(
 
   args.permissions.beginTurn()
   try {
+    const runtimeTrace = await createRuntimeTrace()
+    const runtimeState = resumeCheckpoint?.state ?? createRuntimeState(input, args.sessionId)
     const nextMessages = await runAgentTurn({
       model: args.model,
       tools: args.tools,
@@ -1409,6 +1434,14 @@ async function handleInput(
       modelName: args.runtime?.model ?? '',
       contentReplacementState: args.contentReplacementState,
       contextCollapseState: args.contextCollapseState,
+      memoryManager: args.memoryManager,
+      workingMemoryStore: args.workingMemoryStore,
+      workingMemoryRunId: runtimeState.run.runId,
+      checkpointManager: args.checkpointManager,
+      runtimeMessagesRef: `session:${args.sessionId}`,
+      runtimeInputHash: resumeCheckpoint?.inputHash ?? crypto.createHash('sha256').update(input).digest('hex'),
+      runtimeTrace,
+      runtimeState,
       onContextStats(stats) {
         state.contextStats = stats
         rerender()

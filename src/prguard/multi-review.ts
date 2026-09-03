@@ -2,35 +2,32 @@ import { randomUUID } from 'node:crypto'
 import { reviewResultSchema, findingSchema, type Finding, type PrDiffSnapshot, type ReviewResult, type Severity } from './types.js'
 import type { ModelAdapter } from '../types.js'
 import type { RuntimeConfig } from '../config.js'
+import { AnthropicModelAdapter } from '../anthropic-adapter.js'
+import { ToolRegistry } from '../tool.js'
 import { runPrReview } from './review.js'
 import { verifyReviewEvidenceSelective } from './evidence-verifier.js'
-import type { PrGuardTrace } from './trace.js'
-
-export const prGuardAgentRoles = [
-  {
-    name: 'Security Agent',
-    skillName: 'prguard-security',
-    focus: 'injection, authorization, path traversal, secrets, unsafe deserialization, and trust-boundary violations',
-  },
-  {
-    name: 'Reliability Agent',
-    skillName: 'prguard-reliability',
-    focus: 'exception handling, retries, timeouts, resource cleanup, concurrency, and boundary conditions',
-  },
-  {
-    name: 'Code Quality Agent',
-    skillName: 'prguard-code-quality',
-    focus: 'regressions, maintainability, test gaps, API compatibility, and duplicated or fragile logic',
-  },
-] as const
+import { withTraceModel, type PrGuardTrace } from './trace.js'
+import { ReviewBlackboard, type BlackboardSnapshot } from '../orchestration/blackboard.js'
+import type { CheckpointManager } from '../runtime/checkpoint.js'
+import { hashJson } from '../runtime/ids.js'
+import type { LongTermMemoryItem } from '../memory/types.js'
+import { OrchestrationBudgetController, type OrchestrationBudget, type OrchestrationUsage } from '../orchestration/budget.js'
+import { runReviewJudge, type ReviewJudgeResult } from '../orchestration/judge.js'
+import { SpecialistRuntime } from '../orchestration/specialist-runtime.js'
+import { routePrGuardSpecialists } from '../orchestration/router.js'
+export { prGuardAgentRoles } from '../orchestration/router.js'
 
 export type MultiAgentReport = {
+  agentId?: string
   role: string
   findingCount: number
   attempts?: number
   durationMs?: number
   fallback?: boolean
   failed?: string
+  degraded?: boolean
+  checkpointRunId?: string
+  resumed?: boolean
 }
 
 export type MultiAgentReviewResult = ReviewResult & {
@@ -44,6 +41,22 @@ export type MultiAgentReviewResult = ReviewResult & {
     suppressedFindingCount: number
     fallbackUsed: boolean
     unsupportedFindingIds: string[]
+    blackboardVersion: number
+    failedAgentIds: string[]
+    criticReviewedFindingCount?: number
+    criticRejectedFindingCount?: number
+    conflictCount?: number
+  }
+  orchestration?: {
+    route: {
+      selectedAgents: string[]
+      skippedAgents: string[]
+      reasons: Record<string, string[]>
+      riskSignals: string[]
+    }
+    budget: OrchestrationUsage & { elapsedMs: number; remainingModelCalls: number }
+    judge: Pick<ReviewJudgeResult, 'mode' | 'reviewedFindingIds' | 'rejectedFindingIds' | 'conflictCount' | 'modelError'>
+    blackboard: BlackboardSnapshot
   }
 }
 
@@ -102,7 +115,7 @@ export function aggregateAgentReviews(
   snapshot: PrDiffSnapshot,
   reviews: ReviewResult[],
   agentReports: MultiAgentReport[],
-  options: { fallbackUsed?: boolean } = {},
+  options: { fallbackUsed?: boolean; blackboard?: ReviewBlackboard } = {},
 ): MultiAgentReviewResult {
   const findings: Finding[] = []
   const support = new Map<string, Set<string>>()
@@ -124,14 +137,29 @@ export function aggregateAgentReviews(
       }
       const existingIndex = findings.findIndex(existing => overlaps(existing, finding))
       if (existingIndex === -1) {
-        findings.push(findingSchema.parse({ ...finding, id: `finding-${findings.length + 1}` }))
+        findings.push(findingSchema.parse({
+          ...finding,
+          id: `finding-${findings.length + 1}`,
+          provenance: {
+            sourceAgents: [role],
+            supportCount: 1,
+            aggregationReason: 'first observation from specialist',
+          },
+        }))
         support.set(findings.at(-1)!.id, new Set([role]))
       } else {
         const existing = findings[existingIndex]!
         const roles = support.get(existing.id) ?? new Set([role])
         roles.add(role)
         const count = roles.size
-        findings[existingIndex] = mergeFinding(existing, finding, count)
+        findings[existingIndex] = findingSchema.parse({
+          ...mergeFinding(existing, finding, count),
+          provenance: {
+            sourceAgents: [...roles],
+            supportCount: count,
+            aggregationReason: count > 1 ? 'corroborated by independent specialists' : 'single specialist observation',
+          },
+        })
         support.set(existing.id, roles)
       }
     }
@@ -172,8 +200,23 @@ export function aggregateAgentReviews(
       unsupportedFindingIds: gatedFindings
         .filter(finding => (support.get(finding.id)?.size ?? 1) < 2)
         .map(finding => finding.id),
+      blackboardVersion: options.blackboard?.snapshot().version ?? 0,
+      failedAgentIds: agentReports.filter(report => report.failed).map(report => report.agentId ?? report.role),
     },
   }
+}
+
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+  const runners = Array.from({ length: Math.min(items.length, Math.max(1, limit)) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++
+      results[index] = await worker(items[index]!)
+    }
+  })
+  await Promise.all(runners)
+  return results
 }
 
 export async function runMultiAgentPrReview(
@@ -187,80 +230,129 @@ export async function runMultiAgentPrReview(
     evidenceVerification?: boolean
     specialistRetries?: number
     specialistTimeoutMs?: number
+    checkpointManager?: CheckpointManager
+    runtimeInputHash?: string
+    longTermMemory?: LongTermMemoryItem[]
+    maxSpecialists?: number
+    orchestrationBudget?: Partial<OrchestrationBudget>
+    criticJudge?: boolean
+    judgeModel?: ModelAdapter
   } = {},
 ): Promise<MultiAgentReviewResult> {
-  await options.trace?.record('checkpoint', {
-    phase: 'agent_plan_created',
-    strategy: 'parallel_specialists_then_aggregation',
-    roles: prGuardAgentRoles.map(role => ({ name: role.name, skillName: role.skillName, focus: role.focus })),
+  const blackboard = new ReviewBlackboard()
+  const route = routePrGuardSpecialists(snapshot, {
+    maxSpecialists: options.maxSpecialists ?? runtime.prGuardMaxSpecialists,
   })
+  blackboard.recordRoute(route)
   const retries = Math.max(0, options.specialistRetries ?? 1)
   const timeoutMs = options.specialistTimeoutMs ?? runtime.prGuardReviewTimeoutMs ?? 120_000
-  const settled = await Promise.all(prGuardAgentRoles.map(async role => {
-    const startedAt = performance.now()
-    let lastError: unknown
-    for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
-      const controller = new AbortController()
-      const onAbort = () => controller.abort(options.signal?.reason)
-      options.signal?.addEventListener('abort', onAbort, { once: true })
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
+  const budget = new OrchestrationBudgetController({
+    maxModelCalls: options.orchestrationBudget?.maxModelCalls
+      ?? runtime.prGuardOrchestrationMaxModelCalls
+      ?? route.selected.length * (options.maxSteps ?? 12) * (retries + 1) + 2,
+    maxInputTokens: options.orchestrationBudget?.maxInputTokens ?? runtime.prGuardOrchestrationMaxInputTokens,
+    maxOutputTokens: options.orchestrationBudget?.maxOutputTokens ?? runtime.prGuardOrchestrationMaxOutputTokens,
+    maxDurationMs: options.orchestrationBudget?.maxDurationMs
+      ?? runtime.prGuardOrchestrationMaxDurationMs
+      ?? Math.max(1_000, timeoutMs * (retries + 2)),
+    maxConcurrentAgents: options.orchestrationBudget?.maxConcurrentAgents
+      ?? runtime.prGuardOrchestrationMaxConcurrentAgents
+      ?? route.selected.length,
+  })
+  const baseModel = options.model ?? new AnthropicModelAdapter(new ToolRegistry([]), async () => runtime)
+  const budgetedModel = budget.wrap(baseModel)
+  await options.trace?.record('checkpoint', {
+    phase: 'agent_plan_created',
+    strategy: 'dynamic_route_blackboard_critic_judge',
+    selectedRoles: route.selected.map(role => ({ name: role.name, skillName: role.skillName, focus: role.focus })),
+    skippedRoles: route.skipped.map(role => role.name),
+    routeReasons: route.reasons,
+    riskSignals: route.riskSignals,
+    budget: budget.budget,
+  })
+  const checkpointManager = options.checkpointManager
+  const reviewInputHash = options.runtimeInputHash ?? hashJson({
+    input: snapshot.input,
+    diffText: snapshot.diffText,
+    model: runtime.model,
+    longTermMemory: options.longTermMemory?.map(item => ({
+      id: item.id,
+      content: item.content,
+      confidence: item.confidence,
+    })),
+    selectedRoles: route.selected.map(role => role.name),
+    pipeline: 'prguard-specialists-v3',
+  })
+  const specialistRuntime = new SpecialistRuntime()
+  const settled = await mapWithConcurrency(
+    route.selected,
+    budget.budget.maxConcurrentAgents,
+    async role => {
+    const messagesRef = `prguard-specialist:${reviewInputHash}:${role.name}`
+    const outcome = await specialistRuntime.run<ReviewResult>({
+      specialistId: role.name,
+      goal: `${snapshot.input.cwd}:${role.name}`,
+      taskId: `specialist-${role.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+      messagesRef,
+      inputHash: reviewInputHash,
+      retries,
+      timeoutMs,
+      signal: options.signal,
+      checkpointManager,
+      budget,
+      recover: outputs => {
+        const parsed = reviewResultSchema.safeParse(outputs?.review)
+        return parsed.success ? parsed.data : undefined
+      },
+      serialize: review => ({ review }),
+      execute: (_attempt, signal) => runPrReview(snapshot, runtime, {
+        model: budgetedModel,
+        maxSteps: options.maxSteps,
+        trace: options.trace,
+        signal,
+        evidenceVerification: false,
+        role: role.name,
+        skillName: role.skillName,
+        focus: role.focus,
+        longTermMemory: options.longTermMemory,
+      }),
+      onEvent: async event => {
+        if (event.phase === 'attempt_failed') blackboard.recordFailure(role.name)
         await options.trace?.record('checkpoint', {
-          phase: 'specialist_attempt_started',
+          phase: `specialist_${event.phase}`,
           role: role.name,
-          attempt,
+          attempt: event.attempt,
           timeoutMs,
+          durationMs: event.durationMs,
+          retrying: event.retrying,
+          checkpointRunId: event.checkpointRunId,
+          error: event.error,
         })
-        const reviewPromise = runPrReview(snapshot, runtime, {
-          model: options.model,
-          maxSteps: options.maxSteps,
-          trace: options.trace,
-          signal: controller.signal,
-          evidenceVerification: false,
-          role: role.name,
-          skillName: role.skillName,
-          focus: role.focus,
-        })
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            controller.abort()
-            reject(new Error(`${role.name} timed out after ${timeoutMs} ms.`))
-          }, timeoutMs)
-        })
-        const review = await Promise.race([reviewPromise, timeoutPromise])
-        await options.trace?.record('checkpoint', {
-          phase: 'specialist_attempt_succeeded',
-          role: role.name,
-          attempt,
-          durationMs: Math.round(performance.now() - startedAt),
-        })
-        return { review, report: { role: role.name, findingCount: review.findings.length, attempts: attempt, durationMs: Math.round(performance.now() - startedAt) } as MultiAgentReport }
-      } catch (error) {
-        lastError = error
-        await options.trace?.record('checkpoint', {
-          phase: 'specialist_attempt_failed',
-          role: role.name,
-          attempt,
-          retrying: attempt <= retries && !options.signal?.aborted,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        if (options.signal?.aborted) break
-      } finally {
-        if (timer) clearTimeout(timer)
-        options.signal?.removeEventListener('abort', onAbort)
+      },
+    })
+    if (outcome.value) {
+      blackboard.recordFindings(role.name, outcome.value.findings)
+      return {
+        review: outcome.value,
+        report: {
+          agentId: role.name, role: role.name, findingCount: outcome.value.findings.length,
+          attempts: outcome.attempts, durationMs: outcome.durationMs,
+          checkpointRunId: outcome.checkpointRunId, resumed: outcome.resumed,
+        } as MultiAgentReport,
       }
     }
     return {
-      error: lastError,
       report: {
+        agentId: role.name,
         role: role.name,
         findingCount: 0,
-        attempts: retries + 1,
-        durationMs: Math.round(performance.now() - startedAt),
-        failed: lastError instanceof Error ? lastError.message : String(lastError),
+        attempts: outcome.attempts,
+        durationMs: outcome.durationMs,
+        failed: outcome.error,
+        degraded: true,
       } as MultiAgentReport,
     }
-  }))
+  })
   const reviews: ReviewResult[] = []
   const reports: MultiAgentReport[] = []
   settled.forEach(result => {
@@ -280,14 +372,15 @@ export async function runMultiAgentPrReview(
     })
     try {
       const fallback = await runPrReview(snapshot, runtime, {
-        model: options.model,
+        model: budgetedModel,
         maxSteps: options.maxSteps,
         trace: options.trace,
         signal: options.signal,
         evidenceVerification: options.evidenceVerification,
+        longTermMemory: options.longTermMemory,
       })
       reviews.push(fallback)
-      reports.push({ role: 'Single-Agent Fallback', findingCount: fallback.findings.length, attempts: 1, fallback: true })
+       reports.push({ agentId: 'single-agent-fallback', role: 'Single-Agent Fallback', findingCount: fallback.findings.length, attempts: 1, fallback: true, degraded: true })
       await options.trace?.record('checkpoint', {
         phase: 'specialist_fallback_succeeded',
         findingCount: fallback.findings.length,
@@ -302,8 +395,62 @@ export async function runMultiAgentPrReview(
   }
   const aggregated = aggregateAgentReviews(snapshot, reviews, reports, {
     fallbackUsed: reports.some(report => report.fallback === true),
+    blackboard,
   })
-  let finalResult = aggregated
+  const criticJudgeEnabled = options.criticJudge ?? runtime.prGuardCriticJudgeEnabled ?? true
+  const judgeBaseModel = !criticJudgeEnabled
+    ? undefined
+    : options.judgeModel
+      ? budget.wrap(options.judgeModel)
+      : budgetedModel
+  const judgeModel = judgeBaseModel && options.trace
+    ? withTraceModel(judgeBaseModel, options.trace)
+    : judgeBaseModel
+  const judgment = await runReviewJudge({
+    snapshot,
+    result: aggregated,
+    blackboard,
+    unsupportedFindingIds: aggregated.aggregation.unsupportedFindingIds,
+    model: judgeModel,
+    signal: options.signal,
+  })
+  let finalResult: MultiAgentReviewResult = {
+    ...judgment.result,
+    agents: aggregated.agents,
+    aggregation: {
+      ...aggregated.aggregation,
+      blackboardVersion: blackboard.snapshot().version,
+      criticReviewedFindingCount: judgment.reviewedFindingIds.length,
+      criticRejectedFindingCount: judgment.rejectedFindingIds.length,
+      conflictCount: judgment.conflictCount,
+    },
+    orchestration: {
+      route: {
+        selectedAgents: route.selected.map(role => role.name),
+        skippedAgents: route.skipped.map(role => role.name),
+        reasons: route.reasons,
+        riskSignals: route.riskSignals,
+      },
+      budget: budget.snapshot(),
+      judge: {
+        mode: judgment.mode,
+        reviewedFindingIds: judgment.reviewedFindingIds,
+        rejectedFindingIds: judgment.rejectedFindingIds,
+        conflictCount: judgment.conflictCount,
+        modelError: judgment.modelError,
+      },
+      blackboard: blackboard.snapshot(),
+    },
+  }
+  await options.trace?.record('checkpoint', {
+    phase: 'critic_judge_completed',
+    mode: judgment.mode,
+    reviewedFindingIds: judgment.reviewedFindingIds,
+    rejectedFindingIds: judgment.rejectedFindingIds,
+    conflictCount: judgment.conflictCount,
+    modelError: judgment.modelError,
+    blackboardVersion: blackboard.snapshot().version,
+  })
   if (options.evidenceVerification) {
     const selectedFindingIds = [
       ...aggregated.aggregation.unsupportedFindingIds,
@@ -311,13 +458,14 @@ export async function runMultiAgentPrReview(
         .filter(finding => finding.confidence < 0.8)
         .map(finding => finding.id),
     ]
-    const verification = verifyReviewEvidenceSelective(snapshot, aggregated, {
+    const verification = verifyReviewEvidenceSelective(snapshot, finalResult, {
       findingIds: [...new Set(selectedFindingIds)],
     })
     finalResult = {
       ...verification.result,
-      agents: aggregated.agents,
-      aggregation: aggregated.aggregation,
+      agents: finalResult.agents,
+      aggregation: finalResult.aggregation,
+      orchestration: finalResult.orchestration,
     }
     await options.trace?.record('checkpoint', {
       phase: 'selective_evidence_verification',
@@ -336,6 +484,10 @@ export async function runMultiAgentPrReview(
     categoryRejectedFindingCount: finalResult.aggregation.categoryRejectedFindingCount,
     categoryMismatchAcceptedFindingCount: finalResult.aggregation.categoryMismatchAcceptedFindingCount,
     suppressedFindingCount: finalResult.aggregation.suppressedFindingCount,
+    criticRejectedFindingCount: finalResult.aggregation.criticRejectedFindingCount,
+    conflictCount: finalResult.aggregation.conflictCount,
+    route: finalResult.orchestration?.route,
+    budget: budget.snapshot(),
   })
   return finalResult
 }

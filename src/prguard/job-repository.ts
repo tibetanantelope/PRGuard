@@ -1,20 +1,46 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import mysql from 'mysql2/promise'
 import { MINI_CODE_DIR } from '../config.js'
 import type { ReviewJob } from './jobs.js'
+import { assertReviewJobTransition, isTerminalReviewJobStatus } from './job-state.js'
+
+export type JobLease = {
+  owner: string
+  fencingToken: number
+}
 
 export type ReviewJobRepository = {
   create(job: ReviewJob): Promise<void>
   get(jobId: string): Promise<ReviewJob>
-  claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null>
+  claim(jobId: string, leaseOwner: string, claimedAt: string, leaseDurationMs: number): Promise<ReviewJob | null>
   list(): Promise<ReviewJob[]>
-  update(job: ReviewJob): Promise<void>
-  touch(jobId: string, updatedAt: string): Promise<void>
+  update(job: ReviewJob, lease?: JobLease, expectedUpdatedAt?: string): Promise<boolean>
+  heartbeat(jobId: string, lease: JobLease, heartbeatAt: string, leaseDurationMs: number): Promise<boolean>
 }
 
 function validateJobId(jobId: string): void {
   if (!/^[A-Za-z0-9_-]+$/.test(jobId)) throw new Error(`Invalid PRGuard job ID: ${jobId}`)
+}
+
+function leaseExpiry(startedAt: string, leaseDurationMs: number): string {
+  const timestamp = Date.parse(startedAt)
+  if (!Number.isFinite(timestamp) || !Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
+    throw new Error('A valid lease timestamp and positive duration are required.')
+  }
+  return new Date(timestamp + leaseDurationMs).toISOString()
+}
+
+function holdsLease(job: ReviewJob, lease: JobLease, operationAt: string): boolean {
+  return job.status === 'running'
+    && job.leaseOwner === lease.owner
+    && job.fencingToken === lease.fencingToken
+    && Boolean(job.leaseExpiresAt && job.leaseExpiresAt > operationAt)
+}
+
+function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === 'EEXIST'
 }
 
 export class FileReviewJobRepository implements ReviewJobRepository {
@@ -25,23 +51,38 @@ export class FileReviewJobRepository implements ReviewJobRepository {
     return path.join(this.baseDir, `${jobId}.json`)
   }
 
+  private lockPath(jobId: string): string {
+    return `${this.filePath(jobId)}.lock`
+  }
+
   async create(job: ReviewJob): Promise<void> {
     await mkdir(this.baseDir, { recursive: true })
-    await this.write(job)
+    await this.writeAtomic(job)
   }
 
   async get(jobId: string): Promise<ReviewJob> {
-    return JSON.parse(await readFile(this.filePath(jobId), 'utf8')) as ReviewJob
+    return normalizeFileJob(JSON.parse(await readFile(this.filePath(jobId), 'utf8')) as ReviewJob)
   }
 
-  async claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null> {
-    const job = await this.get(jobId)
-    const staleBefore = Date.parse(updatedAt) - staleAfterMs
-    const staleRunning = job.status === 'running' && Date.parse(job.updatedAt) <= staleBefore
-    if (job.status !== 'queued' && !staleRunning) return null
-    const claimed = { ...job, status: 'running' as const, attempts: job.attempts + 1, updatedAt }
-    await this.write(claimed)
-    return claimed
+  async claim(jobId: string, leaseOwner: string, claimedAt: string, leaseDurationMs: number): Promise<ReviewJob | null> {
+    return this.withLock(jobId, null, async () => {
+      const job = await this.get(jobId)
+      const expiredRunning = job.status === 'running'
+        && (!job.leaseExpiresAt || job.leaseExpiresAt <= claimedAt)
+      if ((job.status !== 'queued' && !expiredRunning) || job.attempts >= job.maxAttempts) return null
+      if (job.status === 'queued') assertReviewJobTransition(job.status, 'running')
+      const claimed: ReviewJob = {
+        ...job,
+        status: 'running',
+        attempts: job.attempts + 1,
+        updatedAt: claimedAt,
+        leaseOwner,
+        leaseExpiresAt: leaseExpiry(claimedAt, leaseDurationMs),
+        fencingToken: (job.fencingToken ?? 0) + 1,
+      }
+      await this.writeAtomic(claimed)
+      return claimed
+    })
   }
 
   async list(): Promise<ReviewJob[]> {
@@ -50,7 +91,7 @@ export class FileReviewJobRepository implements ReviewJobRepository {
       const jobs: ReviewJob[] = []
       for (const entry of entries.filter(item => item.endsWith('.json'))) {
         try {
-          jobs.push(JSON.parse(await readFile(path.join(this.baseDir, entry), 'utf8')) as ReviewJob)
+          jobs.push(normalizeFileJob(JSON.parse(await readFile(path.join(this.baseDir, entry), 'utf8')) as ReviewJob))
         } catch {
           // Ignore partially written or unrelated files.
         }
@@ -61,18 +102,75 @@ export class FileReviewJobRepository implements ReviewJobRepository {
     }
   }
 
-  async update(job: ReviewJob): Promise<void> {
+  async update(job: ReviewJob, lease?: JobLease, expectedUpdatedAt?: string): Promise<boolean> {
+    return this.withLock(job.jobId, false, async () => {
+      const current = await this.get(job.jobId)
+      if (expectedUpdatedAt && current.updatedAt !== expectedUpdatedAt) return false
+      if (lease && !holdsLease(current, lease, job.updatedAt)) return false
+      if (current.status !== job.status) assertReviewJobTransition(current.status, job.status)
+      const updated = isTerminalReviewJobStatus(job.status) || job.status === 'queued'
+        ? { ...job, leaseOwner: undefined, leaseExpiresAt: undefined }
+        : job
+      await this.writeAtomic(updated)
+      return true
+    })
+  }
+
+  async heartbeat(jobId: string, lease: JobLease, heartbeatAt: string, leaseDurationMs: number): Promise<boolean> {
+    return this.withLock(jobId, false, async () => {
+      const job = await this.get(jobId)
+      if (!holdsLease(job, lease, heartbeatAt)) return false
+      await this.writeAtomic({
+        ...job,
+        updatedAt: heartbeatAt,
+        leaseExpiresAt: leaseExpiry(heartbeatAt, leaseDurationMs),
+      })
+      return true
+    })
+  }
+
+  private async writeAtomic(job: ReviewJob): Promise<void> {
     await mkdir(this.baseDir, { recursive: true })
-    await this.write(job)
+    const target = this.filePath(job.jobId)
+    const temporary = path.join(this.baseDir, `.${job.jobId}.${randomUUID()}.tmp`)
+    try {
+      await writeFile(temporary, `${JSON.stringify(job, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(temporary, target)
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined)
+      throw error
+    }
   }
 
-  async touch(jobId: string, updatedAt: string): Promise<void> {
-    const job = await this.get(jobId)
-    await this.write({ ...job, updatedAt })
-  }
-
-  private async write(job: ReviewJob): Promise<void> {
-    await writeFile(this.filePath(job.jobId), `${JSON.stringify(job, null, 2)}\n`, 'utf8')
+  private async withLock<T>(jobId: string, busyValue: T, operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.baseDir, { recursive: true })
+    const lockPath = this.lockPath(jobId)
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        handle = await open(lockPath, 'wx')
+        break
+      } catch (error) {
+        if (!isFileExistsError(error)) throw error
+        try {
+          const lockStat = await stat(lockPath)
+          if (Date.now() - lockStat.mtimeMs > 30_000) {
+            await unlink(lockPath)
+            continue
+          }
+        } catch {
+          continue
+        }
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+    if (!handle) return busyValue
+    try {
+      return await operation()
+    } finally {
+      await handle.close()
+      await unlink(lockPath).catch(() => undefined)
+    }
   }
 }
 
@@ -92,11 +190,15 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
     await this.ensureSchema()
     await this.pool.execute(
       `INSERT INTO review_jobs
-        (id, status, multi_agent, cwd, input_json, attempts, max_attempts, run_id, result_json, error_message, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, status, multi_agent, cwd, input_json, attempts, max_attempts, fencing_token,
+         lease_owner, lease_expires_at, run_id, result_json, error_message, github_feedback_published_at,
+         publish_feedback, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.jobId, job.status, job.multiAgent, job.cwd, JSON.stringify(job.input), job.attempts, job.maxAttempts,
-        job.runId ?? null,
+        job.fencingToken, job.leaseOwner ?? null, job.leaseExpiresAt ? toMySqlDateTime(job.leaseExpiresAt) : null, job.runId ?? null,
         job.result ? JSON.stringify(job.result) : null, job.error ?? null,
+        job.githubFeedbackPublishedAt ? toMySqlDateTime(job.githubFeedbackPublishedAt) : null,
+        job.publishFeedback === true, job.createdBy ?? null,
         toMySqlDateTime(job.createdAt), toMySqlDateTime(job.updatedAt)],
     )
   }
@@ -112,15 +214,18 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
     return fromRow(row)
   }
 
-  async claim(jobId: string, updatedAt: string, staleAfterMs: number): Promise<ReviewJob | null> {
+  async claim(jobId: string, leaseOwner: string, claimedAt: string, leaseDurationMs: number): Promise<ReviewJob | null> {
     validateJobId(jobId)
     await this.ensureSchema()
     const [result] = await this.pool.execute<import('mysql2/promise').ResultSetHeader>(
       `UPDATE review_jobs
-       SET status = 'running', attempts = attempts + 1, updated_at = ?
+       SET status = 'running', attempts = attempts + 1, updated_at = ?, lease_owner = ?,
+           lease_expires_at = ?, fencing_token = fencing_token + 1
        WHERE id = ?
-         AND (status = 'queued' OR (status = 'running' AND updated_at <= ?))`,
-      [toMySqlDateTime(updatedAt), jobId, toMySqlDateTime(new Date(Date.parse(updatedAt) - staleAfterMs).toISOString())],
+         AND attempts < max_attempts
+         AND (status = 'queued' OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))`,
+      [toMySqlDateTime(claimedAt), leaseOwner, toMySqlDateTime(leaseExpiry(claimedAt, leaseDurationMs)),
+        jobId, toMySqlDateTime(claimedAt)],
     )
     if (result.affectedRows === 0) return null
     return this.get(jobId)
@@ -134,25 +239,49 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
     return rows.map(fromRow)
   }
 
-  async update(job: ReviewJob): Promise<void> {
+  async update(job: ReviewJob, lease?: JobLease, expectedUpdatedAt?: string): Promise<boolean> {
     await this.ensureSchema()
-    await this.pool.execute(
+    const current = await this.get(job.jobId)
+    if (lease && !holdsLease(current, lease, job.updatedAt)) return false
+    if (current.status !== job.status) assertReviewJobTransition(current.status, job.status)
+    const clearLease = isTerminalReviewJobStatus(job.status) || job.status === 'queued'
+    const params: unknown[] = [job.status, job.multiAgent, job.cwd, job.attempts, job.maxAttempts,
+      job.fencingToken, clearLease ? null : job.leaseOwner ?? null,
+      clearLease || !job.leaseExpiresAt ? null : toMySqlDateTime(job.leaseExpiresAt),
+      job.runId ?? null, job.result ? JSON.stringify(job.result) : null, job.error ?? null,
+      job.githubFeedbackPublishedAt ? toMySqlDateTime(job.githubFeedbackPublishedAt) : null,
+      job.publishFeedback === true, job.createdBy ?? null,
+      toMySqlDateTime(job.updatedAt), job.jobId, current.status]
+    let where = 'WHERE id = ? AND status = ?'
+    if (expectedUpdatedAt) {
+      where += ' AND updated_at = ?'
+      params.push(toMySqlDateTime(expectedUpdatedAt))
+    }
+    if (lease) {
+      where += ' AND status = \'running\' AND lease_owner = ? AND fencing_token = ? AND lease_expires_at > ?'
+      params.push(lease.owner, lease.fencingToken, toMySqlDateTime(job.updatedAt))
+    }
+    const [result] = await this.pool.execute<import('mysql2/promise').ResultSetHeader>(
       `UPDATE review_jobs
-       SET status = ?, multi_agent = ?, cwd = ?, attempts = ?, max_attempts = ?, run_id = ?, result_json = ?, error_message = ?, updated_at = ?
-       WHERE id = ?`,
-      [job.status, job.multiAgent, job.cwd, job.attempts, job.maxAttempts, job.runId ?? null,
-        job.result ? JSON.stringify(job.result) : null, job.error ?? null,
-        toMySqlDateTime(job.updatedAt), job.jobId],
+       SET status = ?, multi_agent = ?, cwd = ?, attempts = ?, max_attempts = ?, fencing_token = ?,
+           lease_owner = ?, lease_expires_at = ?, run_id = ?, result_json = ?, error_message = ?,
+           github_feedback_published_at = ?, publish_feedback = ?, created_by = ?, updated_at = ?
+       ${where}`,
+      params,
     )
+    return result.affectedRows === 1
   }
 
-  async touch(jobId: string, updatedAt: string): Promise<void> {
+  async heartbeat(jobId: string, lease: JobLease, heartbeatAt: string, leaseDurationMs: number): Promise<boolean> {
     validateJobId(jobId)
     await this.ensureSchema()
-    await this.pool.execute(
-      'UPDATE review_jobs SET updated_at = ? WHERE id = ?',
-      [toMySqlDateTime(updatedAt), jobId],
+    const [result] = await this.pool.execute<import('mysql2/promise').ResultSetHeader>(
+      `UPDATE review_jobs SET updated_at = ?, lease_expires_at = ?
+       WHERE id = ? AND status = 'running' AND lease_owner = ? AND fencing_token = ? AND lease_expires_at > ?`,
+      [toMySqlDateTime(heartbeatAt), toMySqlDateTime(leaseExpiry(heartbeatAt, leaseDurationMs)),
+        jobId, lease.owner, lease.fencingToken, toMySqlDateTime(heartbeatAt)],
     )
+    return result.affectedRows === 1
   }
 
   async close(): Promise<void> {
@@ -170,6 +299,12 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
           input_json JSON NOT NULL,
           attempts INT UNSIGNED NOT NULL DEFAULT 0,
           max_attempts INT UNSIGNED NOT NULL DEFAULT 3,
+          fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0,
+          lease_owner VARCHAR(128) NULL,
+          lease_expires_at DATETIME(3) NULL,
+          github_feedback_published_at DATETIME(3) NULL,
+          publish_feedback BOOLEAN NOT NULL DEFAULT FALSE,
+          created_by VARCHAR(191) NULL,
           run_id VARCHAR(64) NULL,
           result_json JSON NULL,
           error_message TEXT NULL,
@@ -184,7 +319,7 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
         const [columns] = await this.pool.query<import('mysql2/promise').RowDataPacket[]>(
           `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'review_jobs'
-             AND COLUMN_NAME IN ('attempts', 'max_attempts')`,
+             AND COLUMN_NAME IN ('attempts', 'max_attempts', 'fencing_token', 'lease_owner', 'lease_expires_at', 'github_feedback_published_at', 'publish_feedback', 'created_by')`,
         )
         const existing = new Set(columns.map(column => String(column.COLUMN_NAME)))
         if (!existing.has('attempts')) {
@@ -195,6 +330,46 @@ export class MySqlReviewJobRepository implements ReviewJobRepository {
         if (!existing.has('max_attempts')) {
           await this.pool.execute(
             'ALTER TABLE review_jobs ADD COLUMN max_attempts INT UNSIGNED NOT NULL DEFAULT 3',
+          )
+        }
+        if (!existing.has('fencing_token')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0',
+          )
+        }
+        if (!existing.has('lease_owner')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN lease_owner VARCHAR(128) NULL',
+          )
+        }
+        if (!existing.has('lease_expires_at')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN lease_expires_at DATETIME(3) NULL',
+          )
+        }
+        if (!existing.has('github_feedback_published_at')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN github_feedback_published_at DATETIME(3) NULL',
+          )
+        }
+        if (!existing.has('publish_feedback')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN publish_feedback BOOLEAN NOT NULL DEFAULT FALSE',
+          )
+        }
+        if (!existing.has('created_by')) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD COLUMN created_by VARCHAR(191) NULL',
+          )
+        }
+        const [indexes] = await this.pool.query<import('mysql2/promise').RowDataPacket[]>(
+          `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'review_jobs'
+             AND INDEX_NAME = 'idx_review_jobs_lease_expiry'`,
+        )
+        if (indexes.length === 0) {
+          await this.pool.execute(
+            'ALTER TABLE review_jobs ADD INDEX idx_review_jobs_lease_expiry (status, lease_expires_at)',
           )
         }
       })
@@ -221,12 +396,22 @@ function fromRow(row: import('mysql2/promise').RowDataPacket): ReviewJob {
     input: typeof row.input_json === 'string' ? JSON.parse(row.input_json) : row.input_json,
     attempts: Number(row.attempts ?? 0),
     maxAttempts: Number(row.max_attempts ?? 3),
+    fencingToken: Number(row.fencing_token ?? 0),
+    leaseOwner: row.lease_owner ? String(row.lease_owner) : undefined,
+    leaseExpiresAt: row.lease_expires_at ? new Date(row.lease_expires_at).toISOString() : undefined,
     runId: row.run_id ? String(row.run_id) : undefined,
     result: row.result_json ? typeof row.result_json === 'string' ? JSON.parse(row.result_json) : row.result_json : undefined,
     error: row.error_message ? String(row.error_message) : undefined,
+    githubFeedbackPublishedAt: row.github_feedback_published_at ? new Date(row.github_feedback_published_at).toISOString() : undefined,
+    publishFeedback: Boolean(row.publish_feedback),
+    createdBy: row.created_by ? String(row.created_by) : undefined,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   }
+}
+
+function normalizeFileJob(job: ReviewJob): ReviewJob {
+  return { ...job, fencingToken: job.fencingToken ?? 0 }
 }
 
 function toMySqlDateTime(value: string): string {

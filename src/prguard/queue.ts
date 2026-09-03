@@ -7,19 +7,33 @@ export type ReviewQueueMessage = {
   jobId: string
 }
 
+export type ReviewDeadLetter = {
+  id: string
+  originalMessageId: string
+  jobId: string
+  error: string
+  idempotencyKey: string
+}
+
 export type ReviewJobQueue = {
-  enqueue(jobId: string): Promise<void>
+  enqueue(jobId: string, idempotencyKey?: string): Promise<void>
   consume(): Promise<ReviewQueueMessage | null>
   heartbeat(message: ReviewQueueMessage): Promise<void>
   ack(message: ReviewQueueMessage): Promise<void>
-  deadLetter(message: ReviewQueueMessage, jobId: string, error: string): Promise<void>
+  deadLetter(message: ReviewQueueMessage, jobId: string, error: string, idempotencyKey: string): Promise<void>
+  listDeadLetters(limit?: number): Promise<ReviewDeadLetter[]>
+  removeDeadLetter(id: string): Promise<void>
   close(): Promise<void>
 }
 
 export class InMemoryReviewJobQueue implements ReviewJobQueue {
   private readonly pending: string[] = []
+  private readonly publishedKeys = new Set<string>()
+  private readonly deadLetters = new Map<string, ReviewDeadLetter>()
 
-  async enqueue(jobId: string): Promise<void> {
+  async enqueue(jobId: string, idempotencyKey?: string): Promise<void> {
+    if (idempotencyKey && this.publishedKeys.has(idempotencyKey)) return
+    if (idempotencyKey) this.publishedKeys.add(idempotencyKey)
     this.pending.push(jobId)
     prGuardMetrics.increment('prguard_queue_enqueued_total')
   }
@@ -33,7 +47,19 @@ export class InMemoryReviewJobQueue implements ReviewJobQueue {
 
   async ack(_message: ReviewQueueMessage): Promise<void> {}
 
-  async deadLetter(_message: ReviewQueueMessage, _jobId: string, _error: string): Promise<void> {}
+  async deadLetter(message: ReviewQueueMessage, jobId: string, error: string, idempotencyKey: string): Promise<void> {
+    if ([...this.deadLetters.values()].some(item => item.idempotencyKey === idempotencyKey)) return
+    const id = `dead-${randomUUID()}`
+    this.deadLetters.set(id, { id, originalMessageId: message.messageId, jobId, error, idempotencyKey })
+  }
+
+  async listDeadLetters(limit = 100): Promise<ReviewDeadLetter[]> {
+    return [...this.deadLetters.values()].slice(0, limit)
+  }
+
+  async removeDeadLetter(id: string): Promise<void> {
+    this.deadLetters.delete(id)
+  }
 
   async close(): Promise<void> {}
 }
@@ -56,9 +82,20 @@ export class RedisReviewJobQueue implements ReviewJobQueue {
     this.client = createClient({ url: options.url })
   }
 
-  async enqueue(jobId: string): Promise<void> {
+  async enqueue(jobId: string, idempotencyKey?: string): Promise<void> {
     await this.ensureReady()
-    await this.client.xAdd(this.stream, '*', { jobId })
+    if (idempotencyKey) {
+      const published = await this.client.eval(
+        `if redis.call('SET', KEYS[1], '1', 'NX', 'EX', 604800) then
+           return redis.call('XADD', KEYS[2], '*', 'jobId', ARGV[1], 'idempotencyKey', ARGV[2])
+         end
+         return false`,
+        { keys: [`${this.stream}:idempotency:${idempotencyKey}`, this.stream], arguments: [jobId, idempotencyKey] },
+      )
+      if (!published) return
+    } else {
+      await this.client.xAdd(this.stream, '*', { jobId })
+    }
     prGuardMetrics.increment('prguard_queue_enqueued_total')
   }
 
@@ -97,14 +134,34 @@ export class RedisReviewJobQueue implements ReviewJobQueue {
     await this.refreshPendingMetric()
   }
 
-  async deadLetter(message: ReviewQueueMessage, jobId: string, error: string): Promise<void> {
+  async deadLetter(message: ReviewQueueMessage, jobId: string, error: string, idempotencyKey: string): Promise<void> {
     await this.ensureReady()
-    await this.client.xAdd(`${this.stream}:dead-letter`, '*', {
-      originalMessageId: message.messageId,
-      jobId,
-      error,
-    })
+    const published = await this.client.eval(
+      `if redis.call('SET', KEYS[1], '1', 'NX', 'EX', 2592000) then
+         return redis.call('XADD', KEYS[2], '*', 'originalMessageId', ARGV[1], 'jobId', ARGV[2], 'error', ARGV[3], 'idempotencyKey', ARGV[4])
+       end
+       return false`,
+      { keys: [`${this.stream}:dead-letter:idempotency:${idempotencyKey}`, `${this.stream}:dead-letter`], arguments: [message.messageId, jobId, error, idempotencyKey] },
+    )
+    if (!published) return
     prGuardMetrics.increment('prguard_queue_dead_letter_total')
+  }
+
+  async listDeadLetters(limit = 100): Promise<ReviewDeadLetter[]> {
+    await this.ensureReady()
+    const records = await this.client.xRange(`${this.stream}:dead-letter`, '-', '+', { COUNT: limit })
+    return records.map(record => ({
+      id: record.id,
+      originalMessageId: record.message.originalMessageId ?? '',
+      jobId: record.message.jobId ?? '',
+      error: record.message.error ?? '',
+      idempotencyKey: record.message.idempotencyKey ?? record.id,
+    }))
+  }
+
+  async removeDeadLetter(id: string): Promise<void> {
+    await this.ensureReady()
+    await this.client.xDel(`${this.stream}:dead-letter`, id)
   }
 
   private async reclaimPending(): Promise<ReviewQueueMessage | null> {

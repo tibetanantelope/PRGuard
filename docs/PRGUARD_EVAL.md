@@ -76,7 +76,7 @@ npm.cmd run dev -- pr eval --predictions model-predictions.jsonl --gate --min-f1
 
 运行器支持 `split: validation` 或 `split: holdout`。四种实验配置应复用同一个运行器，只替换任务执行函数，保证实验结果的统计口径一致。`runEvaluationExperiment` 目前作为库接口提供，真实 Rule、Single-Agent、Multi-Agent 接入在后续阶段完成。
 
-阶段四增加了 PRGuard 实验适配层和 CLI：
+阶段四增加了 PRGuard 实验适配层和 CLI，当前已经接入 Rule、Single-Agent、Multi-Agent、Verifier 和 Adaptive 实验模式：
 
 ```powershell
 npm.cmd run dev -- pr eval-run --mode rule-baseline --split holdout --output evals/reports/rule-holdout

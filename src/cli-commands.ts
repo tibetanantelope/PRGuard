@@ -63,6 +63,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: 'Resume a saved session (interactive picker, or /resume <id>).',
   },
   {
+    name: '/continue-run',
+    usage: '/continue-run',
+    description: 'Continue the latest incomplete checkpointed run in this session.',
+  },
+  {
     name: '/rename',
     usage: '/rename <name>',
     description: 'Rename the current session.',

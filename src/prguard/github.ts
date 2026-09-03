@@ -143,7 +143,7 @@ export async function publishGithubReviewFeedback(
   reference: string,
   headSha: string,
   result: { findings: Array<{ severity: string; title: string; file: string; lineStart: number }>; summary: { totalFindings: number } },
-  options: { token: string; fetchImpl?: typeof fetch } ,
+  options: { token: string; fetchImpl?: typeof fetch; idempotencyKey?: string } ,
 ): Promise<void> {
   const parsed = parseGithubPrRef(reference)
   const fetchImpl = options.fetchImpl ?? fetch
@@ -154,14 +154,25 @@ export async function publishGithubReviewFeedback(
     'Content-Type': 'application/json',
     'User-Agent': 'PRGuard/0.1',
   }
+  const idempotencyKey = options.idempotencyKey ?? `prguard:${parsed.owner}/${parsed.repo}#${parsed.number}:${headSha}`
+  const checksResponse = await fetchImpl(
+    `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits/${headSha}/check-runs?check_name=${encodeURIComponent('PRGuard Review')}`,
+    { headers },
+  )
+  if (!checksResponse.ok) throw new Error(`GitHub Check Run lookup failed with HTTP ${checksResponse.status}`)
+  const checks = await checksResponse.json() as { check_runs?: Array<{ id: number; external_id?: string }> }
+  const existingCheck = checks.check_runs?.find(check => check.external_id === idempotencyKey)
   const checkResponse = await fetchImpl(
-    `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/check-runs`,
+    existingCheck
+      ? `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/check-runs/${existingCheck.id}`
+      : `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/check-runs`,
     {
-      method: 'POST',
+      method: existingCheck ? 'PATCH' : 'POST',
       headers,
       body: JSON.stringify({
         name: 'PRGuard Review',
-        head_sha: headSha,
+        ...(existingCheck ? {} : { head_sha: headSha }),
+        external_id: idempotencyKey,
         status: 'completed',
         conclusion: result.summary.totalFindings === 0 ? 'success' : 'action_required',
         output: {
@@ -175,14 +186,24 @@ export async function publishGithubReviewFeedback(
   )
   if (!checkResponse.ok) throw new Error(`GitHub Check Run request failed with HTTP ${checkResponse.status}`)
 
+  const marker = `<!-- prguard-review:${idempotencyKey} -->`
+  const commentsResponse = await fetchImpl(
+    `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}/comments?per_page=100`,
+    { headers },
+  )
+  if (!commentsResponse.ok) throw new Error(`GitHub PR comment lookup failed with HTTP ${commentsResponse.status}`)
+  const comments = await commentsResponse.json() as Array<{ id: number; body?: string }>
+  const existingComment = comments.find(comment => comment.body?.includes(marker))
   const commentResponse = await fetchImpl(
-    `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}/comments`,
+    existingComment
+      ? `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/comments/${existingComment.id}`
+      : `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}/comments`,
     {
-      method: 'POST',
+      method: existingComment ? 'PATCH' : 'POST',
       headers,
       body: JSON.stringify({
         body: [
-          '<!-- prguard-review -->',
+          marker,
           `## PRGuard Review: ${result.summary.totalFindings} finding(s)`,
           result.summary.totalFindings === 0
             ? 'No evidence-backed risks were found.'

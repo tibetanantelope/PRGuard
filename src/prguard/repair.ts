@@ -1,8 +1,7 @@
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { promisify } from 'node:util'
 import { z } from 'zod'
 import { AnthropicModelAdapter } from '../anthropic-adapter.js'
 import { runAgentTurn } from '../agent-loop.js'
@@ -13,8 +12,11 @@ import { parseUnifiedDiff, runGitCommand } from './repository.js'
 import { withTraceModel, type PrGuardTrace } from './trace.js'
 import { patchSchema, type Patch, type PrDiffSnapshot, type ReviewResult } from './types.js'
 import { buildPatchSystemPrompt, buildPatchUserPrompt } from './repair-prompt.js'
-
-const execFileAsync = promisify(execFile)
+import {
+  runSandboxedVerification,
+  type VerificationProcessExecutor,
+  type VerificationSandboxConfig,
+} from './sandbox.js'
 
 const modelPatchSchema = z.object({
   summary: z.string().min(1),
@@ -30,6 +32,7 @@ export type PatchApplicationResult = {
     command: string
     output: string
     timedOut?: boolean
+    isolation: 'local-process' | 'docker-container'
   }
 }
 
@@ -140,18 +143,37 @@ export async function generatePatch(
   return patch
 }
 
-function validatePatchPaths(patchText: string): void {
+export function validatePatchSafety(
+  patchText: string,
+  limits: { maxBytes?: number; maxFiles?: number } = {},
+): void {
+  const maxBytes = limits.maxBytes ?? 1024 * 1024
+  const maxFiles = limits.maxFiles ?? 100
+  if (Buffer.byteLength(patchText, 'utf8') > maxBytes) {
+    throw new Error(`Generated patch exceeds the ${maxBytes} byte safety limit.`)
+  }
+  if (/^GIT binary patch$|^Binary files /m.test(patchText)) {
+    throw new Error('Generated patch contains binary content, which is not allowed.')
+  }
+  if (/^(?:new file mode|old mode) (?:120000|160000)$/m.test(patchText)) {
+    throw new Error('Generated patch cannot create symlinks or Git submodules.')
+  }
   const files = parseUnifiedDiff(patchText)
   if (files.length === 0) {
     throw new Error('Generated patch contains no Git file changes.')
   }
+  if (files.length > maxFiles) {
+    throw new Error(`Generated patch exceeds the ${maxFiles} file safety limit.`)
+  }
   for (const file of files) {
     for (const filePath of [file.path, file.oldPath]) {
       if (!filePath) continue
+      const segments = filePath.split(/[\\/]+/)
       if (
         filePath.startsWith('/') ||
         filePath.startsWith('\\') ||
-        filePath.split(/[\\/]+/).includes('..')
+        segments.includes('..') ||
+        segments.some(segment => segment.toLowerCase() === '.git')
       ) {
         throw new Error(`Generated patch contains an unsafe path: ${filePath}`)
       }
@@ -212,66 +234,17 @@ async function applyPatchText(cwd: string, patchText: string): Promise<void> {
   }
 }
 
-function splitCommand(commandLine: string): [string, string[]] {
-  if (/[\r\n;&|<>`$]/.test(commandLine)) {
-    throw new Error('Verification command contains disallowed shell characters.')
-  }
-  const parts = commandLine.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(part =>
-    part.replace(/^(["'])(.*)\1$/, '$2'),
-  ) ?? []
-  const [command, ...args] = parts
-  if (!command) throw new Error('Verification command cannot be empty.')
-  return [command, args]
-}
-
 export async function runVerificationCommand(
   cwd: string,
   commandLine: string,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
-): Promise<{ passed: boolean; output: string; timedOut?: boolean }> {
-  const [command, args] = splitCommand(commandLine)
-  const allowedCommands = new Set([
-    'npm',
-    'npm.cmd',
-    'pnpm',
-    'pnpm.cmd',
-    'yarn',
-    'yarn.cmd',
-    'node',
-    'node.exe',
-    'pytest',
-    'cargo',
-    'go',
-  ])
-  if (!allowedCommands.has(command.toLowerCase())) {
-    throw new Error(`Verification command is not allowed: ${command}`)
-  }
-  try {
-    const isWindowsScript = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command)
-    const executable = isWindowsScript ? (process.env.ComSpec ?? 'cmd.exe') : command
-    const executableArgs = isWindowsScript
-      ? ['/d', '/s', '/c', [command, ...args].join(' ')]
-      : args
-    const result = await execFileAsync(executable, executableArgs, {
-      cwd,
-      maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
-      timeout: options.timeoutMs ?? 120_000,
-      killSignal: 'SIGTERM',
-      signal: options.signal,
-    })
-    return {
-      passed: true,
-      output: [result.stdout, result.stderr].filter(Boolean).join('\n').trim(),
-    }
-  } catch (error) {
-    const detail = error as { stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string }
-    return {
-      passed: false,
-      output: [detail.stdout, detail.stderr, detail.message].filter(Boolean).join('\n').trim(),
-      timedOut: detail.killed === true || detail.signal === 'SIGTERM',
-    }
-  }
+  options: {
+    timeoutMs?: number
+    signal?: AbortSignal
+    sandbox?: Partial<VerificationSandboxConfig>
+    executor?: VerificationProcessExecutor
+  } = {},
+): Promise<{ passed: boolean; output: string; timedOut?: boolean; isolation: 'local-process' | 'docker-container' }> {
+  return runSandboxedVerification(cwd, commandLine, options)
 }
 
 async function createVerificationWorktree(cwd: string): Promise<string> {
@@ -298,9 +271,16 @@ export async function applyAndVerifyPatch(
   cwd: string,
   patch: Patch,
   testCommand: string,
-  options: { trace?: PrGuardTrace; verificationTimeoutMs?: number; signal?: AbortSignal } = {},
+  options: {
+    trace?: PrGuardTrace
+    verificationTimeoutMs?: number
+    signal?: AbortSignal
+    sandbox?: Partial<VerificationSandboxConfig>
+    verificationExecutor?: VerificationProcessExecutor
+    patchLimits?: { maxBytes?: number; maxFiles?: number }
+  } = {},
 ): Promise<PatchApplicationResult> {
-  validatePatchPaths(patch.unifiedDiff)
+  validatePatchSafety(patch.unifiedDiff, options.patchLimits)
   await ensureCleanWorktree(cwd)
   const worktree = await createVerificationWorktree(cwd)
   await options.trace?.record('checkpoint', {
@@ -312,12 +292,15 @@ export async function applyAndVerifyPatch(
     const verification = await runVerificationCommand(worktree, testCommand, {
       timeoutMs: options.verificationTimeoutMs,
       signal: options.signal,
+      sandbox: options.sandbox,
+      executor: options.verificationExecutor,
     })
     await options.trace?.record('verification', {
       status: verification.passed ? 'passed' : 'failed',
       command: testCommand,
       outputChars: verification.output.length,
       isolated: true,
+      processIsolation: verification.isolation,
       timedOut: verification.timedOut === true,
     })
 
@@ -329,7 +312,7 @@ export async function applyAndVerifyPatch(
       })
       return {
         patch: patchSchema.parse({ ...patch, status: 'rolled_back' }),
-        verification: { status: 'failed', command: testCommand, output: verification.output, timedOut: verification.timedOut },
+        verification: { status: 'failed', command: testCommand, output: verification.output, timedOut: verification.timedOut, isolation: verification.isolation },
       }
     }
 
@@ -343,7 +326,7 @@ export async function applyAndVerifyPatch(
     })
     return {
       patch: patchSchema.parse({ ...patch, status: 'applied' }),
-      verification: { status: 'passed', command: testCommand, output: verification.output },
+      verification: { status: 'passed', command: testCommand, output: verification.output, isolation: verification.isolation },
     }
   } finally {
     await removeVerificationWorktree(cwd, worktree)

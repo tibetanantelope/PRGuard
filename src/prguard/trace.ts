@@ -4,6 +4,7 @@ import path from 'node:path'
 import { MINI_CODE_DIR } from '../config.js'
 import type { AgentStep, ChatMessage, ModelAdapter, ModelRequestOptions } from '../types.js'
 import type { ReviewInput } from './types.js'
+import { redactSensitiveValue } from './redaction.js'
 
 export const PRGUARD_TRACE_DIR = path.join(MINI_CODE_DIR, 'prguard', 'runs')
 
@@ -14,6 +15,7 @@ export const traceEventTypes = [
   'model_response',
   'tool_started',
   'tool_finished',
+  'memory_retrieved',
   'review_completed',
   'patch_generated',
   'approval',
@@ -86,7 +88,7 @@ export class PrGuardTrace {
       sequence: this.sequence++,
       timestamp: new Date().toISOString(),
       type,
-      payload,
+      payload: redactSensitiveValue(payload) as Record<string, unknown>,
     }
     const line = `${safeJson(event)}\n`
     this.pending = this.pending.then(() => appendFile(this.filePath, line, 'utf8'))

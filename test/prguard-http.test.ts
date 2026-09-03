@@ -97,6 +97,7 @@ describe('PRGuard HTTP API', () => {
       cwd: process.cwd(),
       attempts: 1,
       maxAttempts: 3,
+      fencingToken: 1,
       result: {
         schemaVersion: '0.1',
         reviewId: 'review-1',

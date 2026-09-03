@@ -10,6 +10,7 @@ import { findingSchema, reviewResultSchema, type Finding, type PrDiffSnapshot, t
 import { buildPrReviewSystemPrompt, buildPrReviewUserPrompt } from './review-prompt.js'
 import { applyDeterministicRules } from './rules.js'
 import { verifyReviewEvidence } from './evidence-verifier.js'
+import type { LongTermMemoryItem } from '../memory/types.js'
 
 const modelEvidenceSchema = z.object({
   source: z.enum(['diff', 'repository', 'code', 'dependency', 'configuration', 'test']),
@@ -203,6 +204,7 @@ export async function runPrReview(
     skillName?: string
     focus?: string
     evidenceVerification?: boolean
+    longTermMemory?: LongTermMemoryItem[]
   } = {},
 ): Promise<ReviewResult> {
   const allTools = await createDefaultToolRegistry({
@@ -228,6 +230,7 @@ export async function runPrReview(
     maxSteps: options.maxSteps ?? 12,
     modelName: runtime.model,
     signal: options.signal,
+    longTermMemory: options.longTermMemory,
     onToolStart: (toolName, input) => {
       toolStartedAt.set(toolName, performance.now())
       void options.trace?.record('tool_started', {
@@ -277,6 +280,7 @@ export async function runPrReview(
       maxSteps: 2,
       modelName: runtime.model,
       signal: options.signal,
+      longTermMemory: options.longTermMemory,
       messages: [
         {
           role: 'system',

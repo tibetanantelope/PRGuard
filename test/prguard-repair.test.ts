@@ -99,6 +99,43 @@ describe('PRGuard repair', () => {
     }
   })
 
+  it('applies a patch only after the configured docker sandbox succeeds', async () => {
+    const cwd = await createRepairRepo()
+    try {
+      const calls: Array<{ file: string; args: string[] }> = []
+      const result = await applyAndVerifyPatch(cwd, makePatch(), 'node verify.mjs', {
+        sandbox: { mode: 'docker' },
+        verificationExecutor: async (file, args) => {
+          calls.push({ file, args })
+          return { stdout: 'sandbox tests passed' }
+        },
+      })
+      assert.equal(result.patch.status, 'applied')
+      assert.equal(result.verification.isolation, 'docker-container')
+      assert.equal(calls[0]?.file, 'docker')
+      assert.equal(calls[0]?.args[0], 'run')
+      assert.equal(normalizeNewlines(await readFile(path.join(cwd, 'src', 'app.js'), 'utf8')), "export const value = 'fixed'\n")
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('rolls back instead of falling back locally when docker cannot start', async () => {
+    const cwd = await createRepairRepo()
+    try {
+      const result = await applyAndVerifyPatch(cwd, makePatch(), 'node verify.mjs', {
+        sandbox: { mode: 'docker' },
+        verificationExecutor: async () => { throw Object.assign(new Error('docker unavailable'), { code: 'ENOENT' }) },
+      })
+      assert.equal(result.patch.status, 'rolled_back')
+      assert.equal(result.verification.isolation, 'docker-container')
+      assert.match(result.verification.output, /docker unavailable/)
+      assert.equal(normalizeNewlines(await readFile(path.join(cwd, 'src', 'app.js'), 'utf8')), "export const value = 'bad'\n")
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('refuses to apply a patch when tracked files are already dirty', async () => {
     const cwd = await createRepairRepo()
     try {

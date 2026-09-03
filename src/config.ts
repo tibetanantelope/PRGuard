@@ -30,17 +30,40 @@ export type RuntimeConfig = {
   mcpServers: Record<string, McpServerConfig>
   sourceSummary: string
   prGuardMySqlUrl?: string
+  prGuardPostgresUrl?: string
+  prGuardMemoryBackend?: 'jsonl' | 'postgres'
+  prGuardEmbeddingDimensions?: number
+  prGuardEmbeddingProvider?: 'hash' | 'remote'
+  prGuardEmbeddingEndpoint?: string
+  prGuardEmbeddingApiKey?: string
+  prGuardEmbeddingModel?: string
   prGuardRedisUrl?: string
   prGuardRedisReclaimIdleMs?: number
   prGuardWorkerMetricsPort?: number
   prGuardMaxAttempts?: number
   prGuardReviewTimeoutMs?: number
+  prGuardMaxSpecialists?: number
+  prGuardOrchestrationMaxModelCalls?: number
+  prGuardOrchestrationMaxInputTokens?: number
+  prGuardOrchestrationMaxOutputTokens?: number
+  prGuardOrchestrationMaxDurationMs?: number
+  prGuardOrchestrationMaxConcurrentAgents?: number
+  prGuardCriticJudgeEnabled?: boolean
   prGuardVerificationTimeoutMs?: number
+  prGuardSandboxMode?: 'local' | 'docker'
+  prGuardSandboxImage?: string
+  prGuardSandboxMemoryMb?: number
+  prGuardSandboxCpus?: number
+  prGuardSandboxPidsLimit?: number
+  prGuardSandboxMaxOutputBytes?: number
+  prGuardPatchMaxBytes?: number
+  prGuardPatchMaxFiles?: number
   prGuardGithubToken?: string
   prGuardGithubWebhookSecret?: string
   prGuardGithubWorkspace?: string
   prGuardGithubFeedbackEnabled?: boolean
   prGuardApiKey?: string
+  prGuardRbacJson?: string
   prGuardRateLimitPerMinute?: number
 }
 
@@ -89,6 +112,11 @@ function parseDotEnv(content: string): Record<string, string> {
 function parsePositiveInteger(value: string | number | undefined, fallback: number): number {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parsePositiveNumber(value: string | number | undefined, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
 async function readDotEnvFile(filePath = PROJECT_ENV_PATH): Promise<Record<string, string>> {
@@ -275,17 +303,52 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
   const authToken = String(env.ANTHROPIC_AUTH_TOKEN ?? '').trim() || undefined
   const apiKey = String(env.ANTHROPIC_API_KEY ?? '').trim() || undefined
   const prGuardMySqlUrl = String(env.PR_GUARD_MYSQL_URL ?? '').trim() || undefined
+  const prGuardPostgresUrl = String(env.PR_GUARD_POSTGRES_URL ?? '').trim() || undefined
+  const memoryBackendValue = String(env.PR_GUARD_MEMORY_BACKEND ?? 'jsonl').trim().toLowerCase()
+  if (memoryBackendValue !== 'jsonl' && memoryBackendValue !== 'postgres') {
+    throw new Error('PR_GUARD_MEMORY_BACKEND must be jsonl or postgres.')
+  }
+  const prGuardMemoryBackend = memoryBackendValue
+  const prGuardEmbeddingDimensions = parsePositiveInteger(env.PR_GUARD_EMBEDDING_DIMENSIONS, 1536)
+  const embeddingProviderValue = String(env.PR_GUARD_EMBEDDING_PROVIDER ?? 'hash').trim().toLowerCase()
+  if (embeddingProviderValue !== 'hash' && embeddingProviderValue !== 'remote') {
+    throw new Error('PR_GUARD_EMBEDDING_PROVIDER must be hash or remote.')
+  }
+  const prGuardEmbeddingProvider = embeddingProviderValue
+  const prGuardEmbeddingEndpoint = String(env.PR_GUARD_EMBEDDING_ENDPOINT ?? '').trim() || undefined
+  const prGuardEmbeddingApiKey = String(env.PR_GUARD_EMBEDDING_API_KEY ?? '').trim() || undefined
+  const prGuardEmbeddingModel = String(env.PR_GUARD_EMBEDDING_MODEL ?? '').trim() || undefined
   const prGuardRedisUrl = String(env.PR_GUARD_REDIS_URL ?? '').trim() || undefined
   const prGuardRedisReclaimIdleMs = parsePositiveInteger(env.PR_GUARD_REDIS_RECLAIM_IDLE_MS, 30_000)
   const prGuardWorkerMetricsPort = parsePositiveInteger(env.PR_GUARD_WORKER_METRICS_PORT, 9091)
   const prGuardMaxAttempts = parsePositiveInteger(env.PR_GUARD_MAX_ATTEMPTS, 3)
   const prGuardReviewTimeoutMs = parsePositiveInteger(env.PR_GUARD_REVIEW_TIMEOUT_MS, 120_000)
+  const prGuardMaxSpecialists = parsePositiveInteger(env.PR_GUARD_MAX_SPECIALISTS, 3)
+  const prGuardOrchestrationMaxModelCalls = parsePositiveInteger(env.PR_GUARD_ORCHESTRATION_MAX_MODEL_CALLS, 74)
+  const prGuardOrchestrationMaxInputTokens = parsePositiveInteger(env.PR_GUARD_ORCHESTRATION_MAX_INPUT_TOKENS, 300_000)
+  const prGuardOrchestrationMaxOutputTokens = parsePositiveInteger(env.PR_GUARD_ORCHESTRATION_MAX_OUTPUT_TOKENS, 50_000)
+  const prGuardOrchestrationMaxDurationMs = parsePositiveInteger(env.PR_GUARD_ORCHESTRATION_MAX_DURATION_MS, 360_000)
+  const prGuardOrchestrationMaxConcurrentAgents = parsePositiveInteger(env.PR_GUARD_ORCHESTRATION_MAX_CONCURRENT_AGENTS, 3)
+  const prGuardCriticJudgeEnabled = String(env.PR_GUARD_CRITIC_JUDGE_ENABLED ?? 'true').trim().toLowerCase() !== 'false'
   const prGuardVerificationTimeoutMs = parsePositiveInteger(env.PR_GUARD_VERIFICATION_TIMEOUT_MS, 120_000)
+  const sandboxModeValue = String(env.PR_GUARD_SANDBOX_MODE ?? 'docker').trim().toLowerCase()
+  if (sandboxModeValue !== 'local' && sandboxModeValue !== 'docker') {
+    throw new Error('PR_GUARD_SANDBOX_MODE must be local or docker.')
+  }
+  const prGuardSandboxMode = sandboxModeValue
+  const prGuardSandboxImage = String(env.PR_GUARD_SANDBOX_IMAGE ?? 'node:22-alpine').trim()
+  const prGuardSandboxMemoryMb = parsePositiveInteger(env.PR_GUARD_SANDBOX_MEMORY_MB, 512)
+  const prGuardSandboxCpus = parsePositiveNumber(env.PR_GUARD_SANDBOX_CPUS, 1)
+  const prGuardSandboxPidsLimit = parsePositiveInteger(env.PR_GUARD_SANDBOX_PIDS_LIMIT, 128)
+  const prGuardSandboxMaxOutputBytes = parsePositiveInteger(env.PR_GUARD_SANDBOX_MAX_OUTPUT_BYTES, 1024 * 1024)
+  const prGuardPatchMaxBytes = parsePositiveInteger(env.PR_GUARD_PATCH_MAX_BYTES, 1024 * 1024)
+  const prGuardPatchMaxFiles = parsePositiveInteger(env.PR_GUARD_PATCH_MAX_FILES, 100)
   const prGuardGithubToken = String(env.GITHUB_TOKEN ?? env.GH_TOKEN ?? '').trim() || undefined
   const prGuardGithubWebhookSecret = String(env.PR_GUARD_GITHUB_WEBHOOK_SECRET ?? '').trim() || undefined
   const prGuardGithubWorkspace = String(env.PR_GUARD_GITHUB_WORKSPACE ?? '').trim() || undefined
   const prGuardGithubFeedbackEnabled = String(env.PR_GUARD_GITHUB_FEEDBACK_ENABLED ?? '').trim().toLowerCase() === 'true'
   const prGuardApiKey = String(env.PR_GUARD_API_KEY ?? '').trim() || undefined
+  const prGuardRbacJson = String(env.PR_GUARD_RBAC_JSON ?? '').trim() || undefined
   const prGuardRateLimitPerMinute = parsePositiveInteger(env.PR_GUARD_RATE_LIMIT_PER_MINUTE, 120)
   const rawMaxOutputTokens =
     process.env.MINI_CODE_MAX_OUTPUT_TOKENS ??
@@ -319,17 +382,40 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${PROJECT_ENV_PATH} > ${MINI_CODE_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env`,
     prGuardMySqlUrl,
+    prGuardPostgresUrl,
+    prGuardMemoryBackend,
+    prGuardEmbeddingDimensions,
+    prGuardEmbeddingProvider,
+    prGuardEmbeddingEndpoint,
+    prGuardEmbeddingApiKey,
+    prGuardEmbeddingModel,
     prGuardRedisUrl,
     prGuardRedisReclaimIdleMs,
     prGuardWorkerMetricsPort,
     prGuardMaxAttempts,
     prGuardReviewTimeoutMs,
+    prGuardMaxSpecialists,
+    prGuardOrchestrationMaxModelCalls,
+    prGuardOrchestrationMaxInputTokens,
+    prGuardOrchestrationMaxOutputTokens,
+    prGuardOrchestrationMaxDurationMs,
+    prGuardOrchestrationMaxConcurrentAgents,
+    prGuardCriticJudgeEnabled,
     prGuardVerificationTimeoutMs,
+    prGuardSandboxMode,
+    prGuardSandboxImage,
+    prGuardSandboxMemoryMb,
+    prGuardSandboxCpus,
+    prGuardSandboxPidsLimit,
+    prGuardSandboxMaxOutputBytes,
+    prGuardPatchMaxBytes,
+    prGuardPatchMaxFiles,
     prGuardGithubToken,
     prGuardGithubWebhookSecret,
     prGuardGithubWorkspace,
     prGuardGithubFeedbackEnabled,
     prGuardApiKey,
+    prGuardRbacJson,
     prGuardRateLimitPerMinute,
   }
 }

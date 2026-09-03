@@ -19,26 +19,67 @@ import { resumePrGuardReview } from './recovery.js'
 import { runPrReview } from './review.js'
 import type { Patch, PrDiffSnapshot, ReviewResult } from './types.js'
 import { createDefaultReviewPersistence, type ReviewPersistence } from './review-persistence.js'
+import { PrGuardMemoryService } from './memory.js'
+import type { FindingDecision } from './memory.js'
+import type { ModelAdapter } from '../types.js'
+import { redactReviewResult, redactSensitiveText } from './redaction.js'
+import { CheckpointManager } from '../runtime/checkpoint.js'
 
 export class ReviewService {
   constructor(
     private readonly runtime: RuntimeConfig,
     private readonly persistence: ReviewPersistence = createDefaultReviewPersistence(runtime.prGuardMySqlUrl),
+    private readonly memoryBaseDir?: string,
+    private readonly checkpointManager: CheckpointManager = new CheckpointManager(),
   ) {}
 
   async review(
     snapshot: PrDiffSnapshot,
-    options: { multiAgent?: boolean; trace?: PrGuardTrace; jobId?: string; signal?: AbortSignal } = {},
+    options: { multiAgent?: boolean; trace?: PrGuardTrace; jobId?: string; signal?: AbortSignal; model?: ModelAdapter } = {},
   ): Promise<ReviewResult> {
-    const result = await (options.multiAgent
-      ? runMultiAgentPrReview(snapshot, this.runtime, { trace: options.trace, signal: options.signal })
-      : runPrReview(snapshot, this.runtime, { trace: options.trace, signal: options.signal }))
-    await this.persistence.saveReview({ jobId: options.jobId, snapshot, result })
-    return result
+    const memory = new PrGuardMemoryService(snapshot.input.cwd, this.memoryBaseDir)
+    try {
+      const longTermMemory = await memory.retrieveForReview(snapshot)
+      await options.trace?.record('memory_retrieved', {
+        count: longTermMemory.length,
+        memories: longTermMemory.map(item => ({
+          id: item.id,
+          kind: item.kind,
+          source: item.source,
+          score: item.retrieval,
+          provenance: item.provenance,
+        })),
+      })
+      const reviewed = await (options.multiAgent
+        ? runMultiAgentPrReview(snapshot, this.runtime, {
+            model: options.model,
+            trace: options.trace,
+            signal: options.signal,
+            longTermMemory,
+            checkpointManager: this.checkpointManager,
+            maxSpecialists: this.runtime.prGuardMaxSpecialists,
+            criticJudge: this.runtime.prGuardCriticJudgeEnabled,
+            orchestrationBudget: {
+              maxModelCalls: this.runtime.prGuardOrchestrationMaxModelCalls,
+              maxInputTokens: this.runtime.prGuardOrchestrationMaxInputTokens,
+              maxOutputTokens: this.runtime.prGuardOrchestrationMaxOutputTokens,
+              maxDurationMs: this.runtime.prGuardOrchestrationMaxDurationMs,
+              maxConcurrentAgents: this.runtime.prGuardOrchestrationMaxConcurrentAgents,
+            },
+          })
+        : runPrReview(snapshot, this.runtime, { model: options.model, trace: options.trace, signal: options.signal, longTermMemory }))
+      const result = redactReviewResult(await memory.applyHistoricalFeedback(reviewed))
+      await this.persistence.saveReview({ jobId: options.jobId, snapshot, result })
+      await memory.recordReview(snapshot, result)
+      return result
+    } catch (error) {
+      await memory.recordFailure(snapshot, 'review', error)
+      throw error
+    }
   }
 
   async resume(runId: string, multiAgent = false): Promise<{ trace: PrGuardTrace; result: ReviewResult }> {
-    return resumePrGuardReview({ runId, runtime: this.runtime, multiAgent })
+    return resumePrGuardReview({ runId, runtime: this.runtime, multiAgent, checkpointManager: this.checkpointManager })
   }
 }
 
@@ -46,6 +87,7 @@ export class RepairService {
   constructor(
     private readonly runtime: RuntimeConfig,
     private readonly persistence: ReviewPersistence = createDefaultReviewPersistence(runtime.prGuardMySqlUrl),
+    private readonly memoryBaseDir?: string,
   ) {}
 
   generate(
@@ -60,7 +102,12 @@ export class RepairService {
   private async generateAndPersist(snapshot: PrDiffSnapshot, review: ReviewResult, findingIds: string[], trace?: PrGuardTrace): Promise<Patch> {
     await this.persistence.saveReview({ snapshot, result: review })
     const patch = await generatePatch(snapshot, review, findingIds, this.runtime, { trace })
-    await this.persistence.savePatch(review.reviewId, patch)
+    await this.persistence.savePatch(review.reviewId, {
+      ...patch,
+      summary: redactSensitiveText(patch.summary),
+      unifiedDiff: redactSensitiveText(patch.unifiedDiff),
+    })
+    await new PrGuardMemoryService(snapshot.input.cwd, this.memoryBaseDir).recordPatch(patch, review.reviewId)
     return patch
   }
 
@@ -70,10 +117,41 @@ export class RepairService {
     testCommand: string,
     trace?: PrGuardTrace,
   ): Promise<PatchApplicationResult> {
-    return applyAndVerifyPatch(cwd, patch, testCommand, {
+    return this.applyAndRemember(cwd, patch, testCommand, trace)
+  }
+
+  async recordFindingDecisions(
+    cwd: string,
+    review: ReviewResult,
+    findingIds: string[],
+    decision: FindingDecision,
+    reason?: string,
+  ): Promise<void> {
+    const memory = new PrGuardMemoryService(cwd, this.memoryBaseDir)
+    await Promise.all(findingIds.map(findingId =>
+      memory.recordFindingDecision(review, findingId, decision, reason),
+    ))
+  }
+
+  private async applyAndRemember(cwd: string, patch: Patch, testCommand: string, trace?: PrGuardTrace): Promise<PatchApplicationResult> {
+    const result = await applyAndVerifyPatch(cwd, patch, testCommand, {
       trace,
       verificationTimeoutMs: this.runtime.prGuardVerificationTimeoutMs,
+      sandbox: {
+        mode: this.runtime.prGuardSandboxMode ?? 'docker',
+        image: this.runtime.prGuardSandboxImage ?? 'node:22-alpine',
+        memoryMb: this.runtime.prGuardSandboxMemoryMb ?? 512,
+        cpus: this.runtime.prGuardSandboxCpus ?? 1,
+        pidsLimit: this.runtime.prGuardSandboxPidsLimit ?? 128,
+        maxOutputBytes: this.runtime.prGuardSandboxMaxOutputBytes ?? 1024 * 1024,
+      },
+      patchLimits: {
+        maxBytes: this.runtime.prGuardPatchMaxBytes,
+        maxFiles: this.runtime.prGuardPatchMaxFiles,
+      },
     })
+    await new PrGuardMemoryService(cwd, this.memoryBaseDir).recordPatch(patch, undefined, result)
+    return result
   }
 }
 

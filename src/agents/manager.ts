@@ -6,6 +6,7 @@ import {
   MAX_SUB_AGENT_STEPS,
   type SubAgentSnapshot,
   type WaitForSubAgentsResult,
+  type SubAgentAggregate,
 } from './types.js'
 import { buildSubAgentPrompt } from './worker-prompt.js'
 
@@ -62,6 +63,23 @@ export class SubAgentManager {
 
   list(): SubAgentSnapshot[] {
     return [...this.records.values()].map(record => this.snapshot(record))
+  }
+
+  aggregate(agentIds?: string[]): SubAgentAggregate {
+    const records = (agentIds ?? [...this.records.keys()]).map(id => this.requireRecord(id))
+    return {
+      requested: records.length,
+      completed: records.filter(record => record.status === 'completed').length,
+      failed: records.filter(record => record.status === 'failed').length,
+      closed: records.filter(record => record.status === 'closed').length,
+      pending: records.filter(record => record.status === 'running').length,
+      reports: records
+        .filter(record => record.status === 'completed' && record.result)
+        .map(record => ({ agentId: record.id, task: record.task, report: record.result! })),
+      errors: records
+        .filter(record => record.status === 'failed' && record.error)
+        .map(record => ({ agentId: record.id, task: record.task, error: record.error! })),
+    }
   }
 
   async wait(

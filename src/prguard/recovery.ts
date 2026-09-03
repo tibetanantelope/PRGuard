@@ -5,6 +5,7 @@ import { runMultiAgentPrReview } from './multi-review.js'
 import { runPrReview } from './review.js'
 import { reviewInputSchema, type ReviewInput, type ReviewResult } from './types.js'
 import type { RuntimeConfig } from '../config.js'
+import type { CheckpointManager } from '../runtime/checkpoint.js'
 
 function resumableInput(events: Awaited<ReturnType<typeof loadPrGuardTrace>>): ReviewInput {
   const started = events.find(event => event.type === 'run_started')
@@ -22,6 +23,7 @@ export async function resumePrGuardReview(args: {
   multiAgent?: boolean
   traceLoader?: typeof loadPrGuardTrace
   traceFactory?: typeof createPrGuardTrace
+  checkpointManager?: CheckpointManager
 }): Promise<{ trace: PrGuardTrace; result: ReviewResult }> {
   const loader = args.traceLoader ?? loadPrGuardTrace
   const events = await loader(args.runId)
@@ -37,10 +39,9 @@ export async function resumePrGuardReview(args: {
   const trace = await factory(snapshot.input, { parentRunId: args.runId })
   await trace.record('checkpoint', { phase: 'resume_started', resumedFrom: args.runId })
   const result = args.multiAgent
-    ? await runMultiAgentPrReview(snapshot, args.runtime, { trace })
+    ? await runMultiAgentPrReview(snapshot, args.runtime, { trace, checkpointManager: args.checkpointManager })
     : await runPrReview(snapshot, args.runtime, { trace })
   await trace.record('run_finished', { status: 'review_completed', resumedFrom: args.runId })
   await trace.flush()
   return { trace, result }
 }
-

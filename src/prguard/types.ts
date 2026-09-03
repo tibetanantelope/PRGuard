@@ -76,6 +76,11 @@ export const findingSchema = z.object({
   reason: z.string().min(1),
   suggestedFix: z.string().min(1),
   verification: verificationSchema,
+  provenance: z.object({
+    sourceAgents: z.array(z.string().min(1)),
+    supportCount: z.number().int().positive(),
+    aggregationReason: z.string().min(1),
+  }).optional(),
 })
 
 export type Finding = z.infer<typeof findingSchema>

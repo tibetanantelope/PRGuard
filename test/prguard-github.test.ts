@@ -68,20 +68,45 @@ describe('PRGuard GitHub input', () => {
   })
 
   it('publishes a Check Run and a PR comment with structured findings', async () => {
-    const requests: Array<{ url: string; body: Record<string, unknown> }> = []
+    const requests: Array<{ url: string; method: string; body?: Record<string, unknown> }> = []
+    let existing = false
     await publishGithubReviewFeedback('octo/demo#42', 'abcdef1234567', {
       findings: [{ severity: 'high', title: 'Command injection', file: 'src/run.ts', lineStart: 8 }],
       summary: { totalFindings: 1 },
     }, {
       token: 'test-token',
+      idempotencyKey: 'review-job-42',
       fetchImpl: async (input, init) => {
-        requests.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
-        return new Response('{}', { status: 201 })
+        const url = String(input)
+        requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined })
+        if (url.includes('/commits/')) return Response.json({ check_runs: existing ? [{ id: 7, external_id: 'review-job-42' }] : [] })
+        if (url.includes('/comments?')) return Response.json(existing ? [{ id: 9, body: '<!-- prguard-review:review-job-42 -->' }] : [])
+        return new Response('{}', { status: existing ? 200 : 201 })
       },
     })
-    assert.equal(requests.length, 2)
-    assert.match(requests[0]!.url, /check-runs$/)
-    assert.equal(requests[0]!.body.head_sha, 'abcdef1234567')
-    assert.match(requests[1]!.url, /issues\/42\/comments$/)
+    assert.equal(requests.length, 4)
+    assert.match(requests[1]!.url, /check-runs$/)
+    assert.equal(requests[1]!.body?.head_sha, 'abcdef1234567')
+    assert.equal(requests[1]!.body?.external_id, 'review-job-42')
+    assert.match(requests[3]!.url, /issues\/42\/comments$/)
+
+    existing = true
+    requests.length = 0
+    await publishGithubReviewFeedback('octo/demo#42', 'abcdef1234567', {
+      findings: [], summary: { totalFindings: 0 },
+    }, {
+      token: 'test-token', idempotencyKey: 'review-job-42',
+      fetchImpl: async (input, init) => {
+        const url = String(input)
+        requests.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined })
+        if (url.includes('/commits/')) return Response.json({ check_runs: [{ id: 7, external_id: 'review-job-42' }] })
+        if (url.includes('/comments?')) return Response.json([{ id: 9, body: '<!-- prguard-review:review-job-42 -->' }])
+        return new Response('{}', { status: 200 })
+      },
+    })
+    assert.equal(requests[1]?.method, 'PATCH')
+    assert.match(requests[1]!.url, /check-runs\/7$/)
+    assert.equal(requests[3]?.method, 'PATCH')
+    assert.match(requests[3]!.url, /issues\/comments\/9$/)
   })
 })

@@ -12,11 +12,16 @@
     "lint": "eslint src test",
     "test": "node test/run-tests.mjs",
     "test:redis": "node --import tsx --test test/prguard-redis-integration.test.ts",
-    "install-local": "tsx src/install.ts"
+    "install-local": "tsx src/install.ts",
+    "memory:migrate": "tsx src/memory/migrate.ts",
+    "memory:smoke": "tsx src/memory/smoke.ts",
+    "memory:retry-embeddings": "tsx src/memory/retry.ts"
   },
   "dependencies": {
+    "@types/pg": "^8.23.1",
     "diff": "^8.0.4",
     "mysql2": "^3.15.0",
+    "pg": "^8.23.0",
     "redis": "^5.8.0",
     "zod": "^4.1.5"
   },

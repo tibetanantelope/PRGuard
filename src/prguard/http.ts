@@ -7,8 +7,12 @@ import { ReviewJobService, ReviewWorker } from './jobs.js'
 import { createDefaultReviewJobRepository, type ReviewJobRepository } from './job-repository.js'
 import { logPrGuardEvent, prGuardMetrics } from './observability.js'
 import { FileGithubWebhookDeliveryStore, loadGithubPrDiffSnapshot, parseGithubWebhookEvent, verifyGithubWebhookSignature, type GithubWebhookDeliveryStore } from './github.js'
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { renderPrGuardAdmin } from './admin.js'
+import { PrGuardAuthorizer, projectAuthorizationId, systemPrincipal, type PrGuardAction } from './security.js'
+import { PrGuardAuditLog } from './audit.js'
+import { createPrGuardRateLimiter, type PrGuardRateLimiter } from './rate-limit.js'
+import { checkVerificationSandbox, type SandboxReadiness } from './sandbox.js'
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024
 
@@ -20,26 +24,13 @@ export type PrGuardServerOptions = {
   jobBaseDir?: string
   jobRepository?: ReviewJobRepository
   githubDeliveryStore?: GithubWebhookDeliveryStore
+  authorizer?: PrGuardAuthorizer
+  auditLog?: PrGuardAuditLog
+  rateLimiter?: PrGuardRateLimiter
+  sandboxReadiness?: () => Promise<SandboxReadiness>
 }
 
 type JsonRecord = Record<string, unknown>
-
-class FixedWindowRateLimiter {
-  private readonly clients = new Map<string, { startedAt: number; count: number }>()
-
-  constructor(private readonly limit: number, private readonly windowMs = 60_000) {}
-
-  allow(client: string): boolean {
-    const now = Date.now()
-    const current = this.clients.get(client)
-    if (!current || now - current.startedAt >= this.windowMs) {
-      this.clients.set(client, { startedAt: now, count: 1 })
-      return true
-    }
-    current.count += 1
-    return current.count <= this.limit
-  }
-}
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -82,10 +73,14 @@ function errorMessage(error: unknown): string {
 }
 
 export function createPrGuardServer(options: PrGuardServerOptions): http.Server {
+  const authorizer = options.authorizer ?? PrGuardAuthorizer.fromEnvironment(
+    options.runtime.prGuardApiKey,
+    options.runtime.prGuardRbacJson,
+  )
   const bindHost = options.host ?? '127.0.0.1'
   const isLoopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1'
-  if (!isLoopback && !options.runtime.prGuardApiKey) {
-    throw new Error('Refusing to bind PRGuard API outside loopback without PR_GUARD_API_KEY.')
+  if (!isLoopback && !authorizer.enabled) {
+    throw new Error('Refusing to bind PRGuard API outside loopback without authentication.')
   }
   const reviewService = new ReviewService(options.runtime)
   const repairService = new RepairService(options.runtime)
@@ -99,7 +94,10 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
     options.jobBaseDir ? `${options.jobBaseDir}/github-deliveries.json` : undefined,
   )
   const workerAbort = new AbortController()
-  const rateLimiter = new FixedWindowRateLimiter(options.runtime.prGuardRateLimitPerMinute ?? 120)
+  const rateLimiter = options.rateLimiter ?? createPrGuardRateLimiter(options.runtime.prGuardRateLimitPerMinute ?? 120, options.runtime.prGuardRedisUrl)
+  const auditLog = options.auditLog ?? new PrGuardAuditLog(options.jobBaseDir ? `${options.jobBaseDir}/audit.jsonl` : undefined)
+  const sandboxReadiness = options.sandboxReadiness ?? (() =>
+    checkVerificationSandbox(options.runtime.prGuardSandboxMode ?? 'docker'))
   if (!options.runtime.prGuardRedisUrl) {
     void new ReviewWorker(jobService).run({
       signal: workerAbort.signal,
@@ -116,17 +114,29 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
       const isWebhook = method === 'POST' && url.pathname === '/api/v1/github/webhook'
       const isAdminPage = method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')
       const client = req.socket.remoteAddress ?? 'unknown'
-      if (!rateLimiter.allow(client)) {
+      const suppliedCorrelationId = Array.isArray(req.headers['x-correlation-id']) ? req.headers['x-correlation-id'][0] : req.headers['x-correlation-id']
+      const correlationId = typeof suppliedCorrelationId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(suppliedCorrelationId)
+        ? suppliedCorrelationId : randomUUID()
+      res.setHeader('x-correlation-id', correlationId)
+      if (!await rateLimiter.allow(client)) {
         prGuardMetrics.increment('prguard_rate_limit_rejections_total')
-        logPrGuardEvent('rate_limit_rejected', { client })
-        json(res, 429, { error: 'Rate limit exceeded. Try again later.' })
+        logPrGuardEvent('rate_limit_rejected', { client, correlationId })
+        json(res, 429, { error: 'Rate limit exceeded. Try again later.', correlationId })
         return
       }
-      if (options.runtime.prGuardApiKey && !isHealth && !isReady && !isWebhook && !isAdminPage && !hasApiKey(req, options.runtime.prGuardApiKey)) {
+      const publicRoute = isHealth || isReady || isWebhook || isAdminPage
+      const principal = authorizer.enabled ? authorizer.authenticate(bearerToken(req)) : systemPrincipal
+      if (!publicRoute && !principal) {
         prGuardMetrics.increment('prguard_auth_failures_total')
-        logPrGuardEvent('api_auth_failed', { client, method, route: url.pathname })
-        json(res, 401, { error: 'Authentication required.' })
+        logPrGuardEvent('api_auth_failed', { client, method, route: url.pathname, correlationId })
+        json(res, 401, { error: 'Authentication required.', correlationId })
         return
+      }
+      const requireAction = async (action: PrGuardAction, projectId?: string, resource = url.pathname): Promise<boolean> => {
+        const allowed = Boolean(principal && authorizer.authorize(principal, action, projectId))
+        await auditLog.record({ timestamp: new Date().toISOString(), correlationId, actor: principal?.subject ?? 'anonymous', action, decision: allowed ? 'allowed' : 'denied', projectId, resource })
+        if (!allowed) json(res, 403, { error: 'Forbidden.', action, correlationId })
+        return allowed
       }
       const requestStartedAt = performance.now()
       res.setHeader('x-content-type-options', 'nosniff')
@@ -138,6 +148,7 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
       })
 
       if (method === 'GET' && url.pathname === '/metrics') {
+        if (!await requireAction('admin:read')) return
         res.statusCode = 200
         res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8')
         res.end(prGuardMetrics.renderPrometheus())
@@ -145,12 +156,14 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
       }
 
       if (isReady) {
-        json(res, 200, {
-          status: 'ready',
+        const sandbox = await sandboxReadiness()
+        json(res, sandbox.ready ? 200 : 503, {
+          status: sandbox.ready ? 'ready' : 'not_ready',
           service: 'prguard',
           dependencies: {
             queue: options.runtime.prGuardRedisUrl ? 'redis' : 'memory',
             persistence: options.runtime.prGuardMySqlUrl ? 'mysql' : 'file',
+            sandbox,
           },
         })
         return
@@ -206,25 +219,61 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
           githubSha: payload.pull_request?.head?.sha,
           token: options.runtime.prGuardGithubToken,
         })
-        const job = await jobService.create(snapshot, true)
+        const job = await jobService.create(snapshot, true, { publishFeedback: true, createdBy: systemPrincipal.subject })
         logPrGuardEvent('github_review_job_enqueued', { jobId: job.jobId, githubRef: snapshot.input.githubRef })
         json(res, 202, { accepted: true, jobId: job.jobId, githubRef: snapshot.input.githubRef })
         return
       }
 
       if (method === 'GET' && url.pathname === '/api/v1/traces') {
-        json(res, 200, { traces: await traceService.list() })
+        if (!await requireAction('trace:read')) return
+        const traces = (await traceService.list()).filter(trace =>
+          Boolean(trace.cwd) && authorizer.authorize(principal!, 'trace:read', projectAuthorizationId(trace.cwd!)),
+        )
+        json(res, 200, { traces })
         return
       }
 
       if (method === 'GET' && url.pathname === '/api/v1/review-jobs') {
-        json(res, 200, { jobs: await jobService.list() })
+        if (!await requireAction('review:read')) return
+        const jobs = (await jobService.list()).filter(job => authorizer.authorize(principal!, 'review:read', projectAuthorizationId(job.cwd)))
+        json(res, 200, { jobs })
+        return
+      }
+
+      if (method === 'GET' && url.pathname === '/api/v1/dead-letters') {
+        if (!await requireAction('dead-letter:read')) return
+        const deadLetters = []
+        for (const deadLetter of await jobService.listDeadLetters()) {
+          const job = await jobService.get(deadLetter.jobId).catch(() => undefined)
+          if (job && authorizer.authorize(principal!, 'dead-letter:read', projectAuthorizationId(job.cwd))) {
+            deadLetters.push(deadLetter)
+          }
+        }
+        json(res, 200, { deadLetters })
+        return
+      }
+
+      const deadLetterMatch = url.pathname.match(/^\/api\/v1\/dead-letters\/([^/]+)\/redrive$/)
+      if (method === 'POST' && deadLetterMatch) {
+        const deadLetterId = decodeURIComponent(deadLetterMatch[1])
+        const deadLetter = (await jobService.listDeadLetters(1000)).find(item => item.id === deadLetterId)
+        if (!deadLetter) {
+          json(res, 404, { error: 'Dead letter not found.', correlationId })
+          return
+        }
+        const deadLetterJob = await jobService.get(deadLetter.jobId)
+        if (!await requireAction('dead-letter:redrive', projectAuthorizationId(deadLetterJob.cwd), deadLetterId)) return
+        const job = await jobService.redriveDeadLetter(deadLetterId)
+        json(res, 200, { status: 'queued', job })
         return
       }
 
       const jobMatch = url.pathname.match(/^\/api\/v1\/review-jobs\/([^/]+)$/)
       if (method === 'GET' && jobMatch) {
-        json(res, 200, await jobService.get(jobMatch[1]))
+        const job = await jobService.get(jobMatch[1])
+        if (!await requireAction('review:read', projectAuthorizationId(job.cwd), job.jobId)) return
+        json(res, 200, job)
         return
       }
 
@@ -232,6 +281,9 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
       if (method === 'POST' && repairMatch) {
         const body = await readJson(req)
         const job = await jobService.get(repairMatch[1])
+        const projectId = projectAuthorizationId(job.cwd)
+        if (!await requireAction('repair:generate', projectId, job.jobId)) return
+        if (!await requireAction('memory:write', projectId, job.jobId)) return
         if (job.status !== 'completed' || !job.result) {
           json(res, 409, { error: 'Repair requires a completed review job.' })
           return
@@ -244,6 +296,9 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
           return
         }
         const apply = body.apply === true
+        if (apply && !await requireAction('repair:approve', projectId, job.jobId)) return
+        if (apply && !await requireAction('repair:apply', projectId, job.jobId)) return
+        if (apply && !await requireAction('memory:feedback', projectId, job.jobId)) return
         const testCommand = typeof body.testCommand === 'string' ? body.testCommand.trim() : ''
         if (apply && !testCommand) {
           json(res, 400, { error: 'testCommand is required when apply is true.' })
@@ -265,7 +320,17 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
             approved: true,
             source: 'api_request',
             findingIds,
+            actor: principal?.subject,
+            correlationId,
+            projectId,
           })
+          await repairService.recordFindingDecisions(
+            snapshot.input.cwd,
+            job.result,
+            findingIds,
+            'accepted',
+            'Patch application approved through the PRGuard API.',
+          )
           const result = await repairService.apply(snapshot.input.cwd, patch, testCommand, trace)
           await trace.record('run_finished', { status: result.patch.status, findingIds: patch.findingIds })
           await trace.flush()
@@ -280,12 +345,23 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
 
       const traceMatch = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)$/)
       if (method === 'GET' && traceMatch) {
-        json(res, 200, { runId: traceMatch[1], events: await traceService.load(traceMatch[1]) })
+        if (!await requireAction('trace:read')) return
+        const events = await traceService.load(traceMatch[1])
+        const started = events.find(event => event.type === 'run_started')
+        const input = started?.payload.input
+        const cwd = input && typeof input === 'object' && !Array.isArray(input)
+          ? String((input as Record<string, unknown>).cwd ?? '')
+          : ''
+        if (!cwd || !await requireAction('trace:read', projectAuthorizationId(cwd), traceMatch[1])) return
+        json(res, 200, { runId: traceMatch[1], events })
         return
       }
 
       if (method === 'POST' && url.pathname === '/api/v1/reviews') {
         const body = await readJson(req)
+        const projectId = projectAuthorizationId(String(body.cwd ?? ''))
+        if (!await requireAction('review:create', projectId)) return
+        if (!await requireAction('memory:read', projectId) || !await requireAction('memory:write', projectId)) return
         const snapshot = await loadPrDiffSnapshot(body)
         const multiAgent = body.multiAgent === true
         const trace = await traceService.create(snapshot.input)
@@ -294,7 +370,7 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
           await trace.record('run_finished', { status: 'review_completed' })
           await trace.flush()
           prGuardMetrics.recordTrace(await traceService.load(trace.runId))
-          logPrGuardEvent('review_completed', { runId: trace.runId, findingCount: review.findings.length, multiAgent })
+          logPrGuardEvent('review_completed', { runId: trace.runId, findingCount: review.findings.length, multiAgent, correlationId, actor: principal?.subject, projectId })
           json(res, 200, { runId: trace.runId, review })
         } catch (error) {
           await trace.record('run_failed', { phase: 'review', error: errorMessage(error) })
@@ -306,8 +382,13 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
 
       if (method === 'POST' && url.pathname === '/api/v1/review-jobs') {
         const body = await readJson(req)
+        const projectId = projectAuthorizationId(String(body.cwd ?? ''))
+        if (!await requireAction('review:create', projectId)) return
+        if (!await requireAction('memory:read', projectId) || !await requireAction('memory:write', projectId)) return
+        const publishFeedback = body.publishFeedback === true
+        if (publishFeedback && !await requireAction('review:publish', projectId)) return
         const snapshot = await loadPrDiffSnapshot(body)
-        const job = await jobService.create(snapshot, body.multiAgent === true)
+        const job = await jobService.create(snapshot, body.multiAgent === true, { publishFeedback, createdBy: principal?.subject })
         json(res, 202, job)
         return
       }
@@ -322,18 +403,16 @@ export function createPrGuardServer(options: PrGuardServerOptions): http.Server 
   server.once('close', () => {
     workerAbort.abort()
     void jobService.close()
+    void rateLimiter.close()
   })
   return server
 }
 
-function hasApiKey(req: http.IncomingMessage, expected: string): boolean {
+function bearerToken(req: http.IncomingMessage): string {
   const header = req.headers.authorization
-  const provided = typeof header === 'string' && header.startsWith('Bearer ')
+  return typeof header === 'string' && header.startsWith('Bearer ')
     ? header.slice('Bearer '.length)
     : ''
-  const left = Buffer.from(provided)
-  const right = Buffer.from(expected)
-  return left.length === right.length && timingSafeEqual(left, right)
 }
 
 export async function startPrGuardServer(options: PrGuardServerOptions): Promise<http.Server> {

@@ -26,7 +26,7 @@ function testTool(name: string): ToolDefinition<Record<string, never>> {
 }
 
 describe('SubAgentManager', () => {
-  it('exposes the four root orchestration tools', async () => {
+  it('exposes the root orchestration tools including aggregation', async () => {
     const model: ModelAdapter = {
       async next(): Promise<AgentStep> {
         return { type: 'assistant', content: 'worker report' }
@@ -41,7 +41,7 @@ describe('SubAgentManager', () => {
 
     assert.deepEqual(
       tools.list().map(tool => tool.name),
-      ['spawn_agent', 'list_agents', 'wait_agent', 'close_agent'],
+      ['spawn_agent', 'list_agents', 'wait_agent', 'close_agent', 'aggregate_agents'],
     )
     const spawned = await tools.execute(
       'spawn_agent',
@@ -68,6 +68,19 @@ describe('SubAgentManager', () => {
       status: 'completed',
       result: 'worker report',
     }])
+    const aggregate = await tools.execute(
+      'aggregate_agents',
+      { agent_ids: [spawnedOutput.agent.id] },
+      { cwd: process.cwd() },
+    )
+    const aggregateOutput = JSON.parse(aggregate.output) as {
+      completed: number
+      failed: number
+      reports: Array<{ report: string }>
+    }
+    assert.equal(aggregateOutput.completed, 1)
+    assert.equal(aggregateOutput.failed, 0)
+    assert.equal(aggregateOutput.reports[0]?.report, 'worker report')
   })
 
   it('runs at most three isolated workers with only the read-only tool set', async () => {

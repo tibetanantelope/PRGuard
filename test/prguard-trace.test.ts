@@ -19,7 +19,10 @@ describe('PRGuard trace', () => {
         diffText: 'diff',
       }, { baseDir, runId: 'trace-001' })
       await trace.record('checkpoint', { phase: 'review_started' })
-      await trace.record('review_completed', { findingCount: 1 })
+      await trace.record('review_completed', {
+        findingCount: 1,
+        result: { summary: 'api_key=trace-secret', token: 'field-secret' },
+      })
       await trace.record('run_finished', { status: 'review_completed' })
       await trace.flush()
 
@@ -27,6 +30,7 @@ describe('PRGuard trace', () => {
       assert.deepEqual(events.map(event => event.sequence), [0, 1, 2, 3])
       assert.equal(events[0]?.payload.input?.hasInlineDiff, true)
       assert.match(replayPrGuardTrace(events), /review_completed/)
+      assert.doesNotMatch(JSON.stringify(events), /trace-secret|field-secret/)
 
       const summaries = await listPrGuardTraces(baseDir)
       assert.equal(summaries.length, 1)
@@ -37,4 +41,3 @@ describe('PRGuard trace', () => {
     }
   })
 })
-

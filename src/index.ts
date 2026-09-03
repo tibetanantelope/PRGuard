@@ -30,6 +30,8 @@ import {
   createContextCollapseState,
 } from './compact/context-collapse.js'
 import { createContentReplacementState } from './utils/tool-result-storage.js'
+import { AgentMemoryManager } from './memory/index.js'
+import { CheckpointManager, WorkingMemoryStore, createRuntimeState, createRuntimeTrace } from './runtime/index.js'
 
 async function main(): Promise<void> {
   const cwd = process.cwd()
@@ -106,6 +108,17 @@ async function main(): Promise<void> {
   ]
   const contentReplacementState = createContentReplacementState()
   const contextCollapseState = createContextCollapseState()
+  const memoryManager = new AgentMemoryManager(cwd, undefined, {
+    backend: runtime?.prGuardMemoryBackend,
+    postgresUrl: runtime?.prGuardPostgresUrl,
+    embeddingDimensions: runtime?.prGuardEmbeddingDimensions,
+    embeddingProvider: runtime?.prGuardEmbeddingProvider,
+    embeddingEndpoint: runtime?.prGuardEmbeddingEndpoint,
+    embeddingApiKey: runtime?.prGuardEmbeddingApiKey,
+    embeddingModel: runtime?.prGuardEmbeddingModel,
+  })
+  const workingMemoryStore = new WorkingMemoryStore()
+  const checkpointManager = new CheckpointManager(undefined, workingMemoryStore)
 
   async function refreshSystemPrompt(): Promise<void> {
     messages[0] = {
@@ -146,6 +159,9 @@ async function main(): Promise<void> {
         sessionId,
         alreadySavedCount: 0,
         resumeTarget: resolvedResumeTarget,
+        memoryManager,
+        workingMemoryStore,
+        checkpointManager,
       })
       return
     }
@@ -254,12 +270,22 @@ async function main(): Promise<void> {
       messages = [...messages, { role: 'user', content: input }]
       permissions.beginTurn()
       try {
+        const runtimeTrace = await createRuntimeTrace()
+        const runtimeState = createRuntimeState(input, crypto.randomUUID().slice(0, 8))
         messages = await runAgentTurn({
           model,
           tools,
           messages,
           cwd,
           permissions,
+          memoryManager,
+          runtimeTrace,
+          runtimeState,
+          workingMemoryStore,
+          workingMemoryRunId: runtimeState.run.runId,
+          checkpointManager,
+          runtimeMessagesRef: `session:${cwd}`,
+          runtimeInputHash: crypto.createHash('sha256').update(input).digest('hex'),
           modelName: runtime?.model ?? '',
           contentReplacementState,
           contextCollapseState,
